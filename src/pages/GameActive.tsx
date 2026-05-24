@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Play, Pause, Plus, Minus, Flag, Trophy, Clock, ChevronDown, ChevronUp, Check } from 'lucide-react';
+import { Play, Pause, Plus, Minus, Flag, Trophy, Clock, ChevronDown, ChevronUp, Check, BarChart2, UserPlus } from 'lucide-react';
 import { useStore } from '@/store/useStore';
 import { useGameTimer } from '@/hooks/useGameTimer';
 import { FormationField } from '@/components/FormationField';
@@ -26,6 +26,9 @@ export const GameActive = () => {
   const [editingNextShift, setEditingNextShift] = useState(false);
   const [nextShiftOverride, setNextShiftOverride] = useState<ShiftPlayer[] | null>(null);
 
+  const [showStatsModal, setShowStatsModal] = useState(false);
+  const [showLateArrivalModal, setShowLateArrivalModal] = useState(false);
+
   if (!game) return <div className="p-8 text-center text-gray-400">Game not found</div>;
 
   const activeShift = game.shifts.find(s => s.status === 'active') ?? null;
@@ -35,6 +38,9 @@ export const GameActive = () => {
   const attendingPlayers = players.filter(p => game.attendance.includes(p.id)).sort((a, b) => a.number - b.number);
   const fieldPlayers = players.filter(p => onFieldIds.has(p.id));
   const benchPlayers = attendingPlayers.filter(p => !onFieldIds.has(p.id));
+
+  // Players not yet marked attending (for late arrivals)
+  const notAttending = players.filter(p => !game.attendance.includes(p.id)).sort((a, b) => a.number - b.number);
 
   // Next shift suggestion
   const nextShiftNum = (timer.currentShiftNum + 1) as 1 | 2 | 3 | 4 | 5 | 6;
@@ -56,6 +62,33 @@ export const GameActive = () => {
     [game.shifts, timer.gameMinute]
   );
 
+  // Positions played per player (for stats)
+  const positionsPlayedMap = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    for (const shift of game.shifts) {
+      if (shift.status === 'completed' || shift.status === 'active') {
+        for (const sp of shift.players) {
+          if (!map.has(sp.playerId)) map.set(sp.playerId, new Set());
+          map.get(sp.playerId)!.add(sp.position);
+        }
+      }
+    }
+    return map;
+  }, [game.shifts]);
+
+  // Goals and assists per player (for stats)
+  const gameGoals = useMemo(() => {
+    const goals = new Map<string, number>();
+    const assists = new Map<string, number>();
+    for (const ev of game.events) {
+      if (ev.type === 'goal' && !ev.isOpponentGoal) {
+        if (ev.playerId) goals.set(ev.playerId, (goals.get(ev.playerId) ?? 0) + 1);
+        if (ev.assistPlayerId) assists.set(ev.assistPlayerId, (assists.get(ev.assistPlayerId) ?? 0) + 1);
+      }
+    }
+    return { goals, assists };
+  }, [game.events]);
+
   // Diff: who comes on/off between current and next shift
   const nextOnFieldIds = new Set(nextShiftPlayers.map(p => p.playerId));
   const comingOff = (activeShift?.players ?? []).filter(p => !nextOnFieldIds.has(p.playerId));
@@ -73,14 +106,12 @@ export const GameActive = () => {
   };
   const triggerHalfTime = async () => {
     await pauseTimer();
-    // Complete active shift
     const shifts = game.shifts.map(s =>
       s.id === activeShift?.id ? { ...s, status: 'completed' as const } : s
     );
     await updateGame(game.id, { status: 'half-time', timerStartedAt: null, timerElapsed: 45 * 60, shifts });
   };
   const startSecondHalf = async () => {
-    // Activate Shift 4 with the H2 GK and suggested rotation
     const h2Suggestion = suggestNextShift({ ...game, currentHalf: 2 }, players, 4, 45);
     const shifts = game.shifts.map(s =>
       s.shiftNumber === 4 ? { ...s, status: 'active' as const, players: h2Suggestion } : s
@@ -129,8 +160,13 @@ export const GameActive = () => {
     await updateGame(game.id, { shifts: game.shifts.map(s => s.id === activeShift.id ? { ...s, players: updated } : s) });
     setSubOutId(''); setSubInId('');
     setShowSubModal(false);
-    // Also update the next shift suggestion if the subbed-in player was about to come on
     setNextShiftOverride(null);
+  };
+
+  // ── Late arrival ─────────────────────────────────────────────────────────────
+  const addLateArrival = async (playerId: string) => {
+    await updateGame(game.id, { attendance: [...game.attendance, playerId] });
+    setShowLateArrivalModal(false);
   };
 
   // ── Confirm next shift ───────────────────────────────────────────────────────
@@ -157,8 +193,8 @@ export const GameActive = () => {
   };
 
   const isLiveGame = ['first-half', 'second-half'].includes(game.status);
-  const maxMin = game.attendance.length > 0
-    ? Math.max(...attendingPlayers.map(p => minutesMap.get(p.id) ?? 0))
+  const maxMin = attendingPlayers.length > 0
+    ? Math.max(1, ...attendingPlayers.map(p => minutesMap.get(p.id) ?? 0))
     : 1;
 
   return (
@@ -286,7 +322,7 @@ export const GameActive = () => {
               </div>
             )}
 
-            {/* Edit mode: full next lineup with swap buttons */}
+            {/* Edit mode */}
             {editingNextShift && (
               <div className="px-3 py-2">
                 <p className="text-xs text-gray-500 mb-2">Tap a bench player to swap into a position</p>
@@ -328,14 +364,21 @@ export const GameActive = () => {
 
         {/* ── Playing Time Panel ── */}
         <div className="mx-3 mt-3 mb-3 bg-gray-800 rounded-xl overflow-hidden">
-          <button
-            className="w-full flex items-center px-3 py-2.5 text-left"
-            onClick={() => setShowTimePanel(v => !v)}
-          >
-            <Clock size={14} className="text-gray-400 mr-2" />
-            <span className="text-xs font-semibold text-gray-300 flex-1">PLAYING TIME</span>
-            {showTimePanel ? <ChevronUp size={14} className="text-gray-500" /> : <ChevronDown size={14} className="text-gray-500" />}
-          </button>
+          <div className="flex items-center px-3 py-2.5">
+            <button className="flex-1 flex items-center text-left" onClick={() => setShowTimePanel(v => !v)}>
+              <Clock size={14} className="text-gray-400 mr-2" />
+              <span className="text-xs font-semibold text-gray-300 flex-1">PLAYING TIME</span>
+              {showTimePanel ? <ChevronUp size={14} className="text-gray-500" /> : <ChevronDown size={14} className="text-gray-500" />}
+            </button>
+            {isCoach && notAttending.length > 0 && (
+              <button
+                onClick={() => setShowLateArrivalModal(true)}
+                className="ml-2 flex items-center gap-1 text-xs text-pitch-400 border border-pitch-700 px-2 py-1 rounded-lg"
+              >
+                <UserPlus size={12} /> Late
+              </button>
+            )}
+          </div>
           {showTimePanel && (
             <div className="px-3 pb-3 space-y-1.5">
               {[...attendingPlayers]
@@ -376,6 +419,11 @@ export const GameActive = () => {
               className="flex-1 bg-blue-700 rounded-xl py-3 flex flex-col items-center gap-0.5 active:scale-95">
               <span className="text-base font-bold">⇄</span>
               <span className="text-xs font-medium">Sub</span>
+            </button>
+            <button onClick={() => setShowStatsModal(true)}
+              className="flex-1 bg-purple-700 rounded-xl py-3 flex flex-col items-center gap-0.5 active:scale-95">
+              <BarChart2 size={18} />
+              <span className="text-xs font-medium">Stats</span>
             </button>
             {game.status === 'first-half' && (
               <button onClick={triggerHalfTime}
@@ -455,7 +503,7 @@ export const GameActive = () => {
                 <label className="text-xs text-gray-400 mb-2 block">Sub OUT (on field)</label>
                 <div className="grid grid-cols-2 gap-1.5">
                   {fieldPlayers
-                    .filter(p => p.id !== activeGkId) // GK cannot be subbed out
+                    .filter(p => p.id !== activeGkId)
                     .map(p => (
                       <button key={p.id} onClick={() => setSubOutId(p.id)}
                         className={`text-sm py-2 px-2 rounded-lg ${subOutId === p.id ? 'bg-red-700' : 'bg-gray-700'}`}>
@@ -484,6 +532,110 @@ export const GameActive = () => {
                 Confirm Sub
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── In-Game Stats Modal ── */}
+      {showStatsModal && (
+        <div className="fixed inset-0 bg-black/70 flex items-end z-50" onClick={() => setShowStatsModal(false)}>
+          <div className="w-full bg-gray-800 rounded-t-2xl max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="sticky top-0 bg-gray-800 px-5 pt-5 pb-3 border-b border-gray-700">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-bold">In-Game Stats</h3>
+                <button onClick={() => setShowStatsModal(false)} className="text-gray-400 text-sm">✕</button>
+              </div>
+              <p className="text-xs text-gray-500 mt-0.5">
+                {game.status === 'first-half' || game.status === 'second-half'
+                  ? `${timer.gameMinute}' played`
+                  : game.status === 'half-time' ? 'Half time' : 'Full time'}
+              </p>
+            </div>
+            <div className="px-4 py-3">
+              {/* Header row */}
+              <div className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-x-3 text-xs text-gray-500 font-semibold mb-2 px-1">
+                <span>Player</span>
+                <span className="w-10 text-right">Min</span>
+                <span className="w-8 text-center">G</span>
+                <span className="w-8 text-center">A</span>
+                <span className="w-6 text-center">{''}</span>
+              </div>
+              <div className="space-y-1">
+                {[...attendingPlayers]
+                  .sort((a, b) => (minutesMap.get(b.id) ?? 0) - (minutesMap.get(a.id) ?? 0))
+                  .map(p => {
+                    const mins = minutesMap.get(p.id) ?? 0;
+                    const goals = gameGoals.goals.get(p.id) ?? 0;
+                    const assists = gameGoals.assists.get(p.id) ?? 0;
+                    const positions = positionsPlayedMap.get(p.id);
+                    const posStr = positions ? Array.from(positions).join(', ') : '—';
+                    const isOnField = onFieldIds.has(p.id);
+                    const isGk = p.id === activeGkId;
+                    return (
+                      <div key={p.id} className="bg-gray-700/50 rounded-xl p-3">
+                        <div className="grid grid-cols-[1fr_auto_auto_auto] gap-x-3 items-center">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <div className={`w-2 h-2 rounded-full shrink-0 ${isOnField ? 'bg-pitch-400' : 'bg-gray-500'}`} />
+                            <span className="text-xs text-gray-400 shrink-0">#{p.number}</span>
+                            <span className="text-sm font-medium text-white truncate">{p.name.split(' ')[0]}</span>
+                            {isGk && <span className="text-xs text-yellow-500 shrink-0">GK</span>}
+                          </div>
+                          <span className="text-sm font-mono text-gray-200 w-10 text-right">{mins}m</span>
+                          <span className={`text-sm font-bold w-8 text-center ${goals > 0 ? 'text-amber-400' : 'text-gray-600'}`}>
+                            {goals > 0 ? goals : '—'}
+                          </span>
+                          <span className={`text-sm font-bold w-8 text-center ${assists > 0 ? 'text-blue-400' : 'text-gray-600'}`}>
+                            {assists > 0 ? assists : '—'}
+                          </span>
+                        </div>
+                        {positions && positions.size > 0 && (
+                          <p className="text-xs text-gray-500 mt-1 ml-4">
+                            {posStr}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+              </div>
+              {/* Legend */}
+              <div className="flex gap-4 mt-4 text-xs text-gray-500 px-1">
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-pitch-400 inline-block" /> On field</span>
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-gray-500 inline-block" /> Bench</span>
+                <span className="text-amber-400 font-bold">G</span><span>= Goals</span>
+                <span className="text-blue-400 font-bold">A</span><span>= Assists</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Late Arrival Modal ── */}
+      {showLateArrivalModal && (
+        <div className="fixed inset-0 bg-black/70 flex items-end z-50" onClick={() => setShowLateArrivalModal(false)}>
+          <div className="w-full bg-gray-800 rounded-t-2xl p-5 max-h-[70vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <h3 className="text-lg font-bold mb-1 flex items-center gap-2">
+              <UserPlus size={20} /> Add Late Arrival
+            </h3>
+            <p className="text-xs text-gray-500 mb-4">
+              Player will be added to attendance and included in upcoming shifts.
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              {notAttending.map(p => (
+                <button key={p.id} onClick={() => addLateArrival(p.id)}
+                  className="flex items-center gap-2 bg-gray-700 rounded-xl p-3 text-left active:scale-95 transition-transform">
+                  <div className="w-8 h-8 bg-pitch-700 rounded-full flex items-center justify-center text-sm font-bold shrink-0">
+                    {p.number}
+                  </div>
+                  <div>
+                    <p className="text-sm font-medium">{p.name.split(' ')[0]}</p>
+                    <p className="text-xs text-gray-400">{p.positions[0] ?? 'Any'}</p>
+                  </div>
+                </button>
+              ))}
+            </div>
+            {notAttending.length === 0 && (
+              <p className="text-center text-gray-500 py-4 text-sm">All players are already attending.</p>
+            )}
           </div>
         </div>
       )}

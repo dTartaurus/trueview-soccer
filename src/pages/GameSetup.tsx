@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Check, Users, Zap, ArrowRight, Lock, ChevronDown } from 'lucide-react';
+import { Check, Users, Zap, ArrowRight, Lock, ChevronDown, Eye } from 'lucide-react';
 import { useStore } from '@/store/useStore';
 import { computeSeasonStats, getFormationPositions } from '@/lib/utils';
 import type { ShiftPlayer, Position } from '@/types';
@@ -31,6 +31,8 @@ export const GameSetup = () => {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiText, setAiText] = useState('');
   const [showAiText, setShowAiText] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+  const [previewPickingIdx, setPreviewPickingIdx] = useState<number | null>(null);
 
   // Initialise lineup slots from formation (or existing preset)
   useEffect(() => {
@@ -337,11 +339,11 @@ export const GameSetup = () => {
           )}
         </div>
 
-        {/* ── Start Game ── */}
-        <button onClick={startGame} disabled={!canStart}
+        {/* ── Preview / Start ── */}
+        <button onClick={() => setShowPreview(true)} disabled={!canStart}
           className="w-full bg-pitch-700 text-white rounded-xl py-4 font-bold text-lg flex items-center justify-center gap-2 disabled:opacity-50 active:scale-95 transition-transform shadow-lg">
-          <ArrowRight size={22} />
-          Start Game
+          <Eye size={22} />
+          Preview Lineup
         </button>
         {!canStart && (
           <p className="text-center text-xs text-gray-400">
@@ -356,6 +358,105 @@ export const GameSetup = () => {
           </button>
         )}
       </div>
+
+      {/* ── Lineup Preview Modal ── */}
+      {showPreview && (
+        <div className="fixed inset-0 bg-black/60 flex items-end z-40" onClick={() => setShowPreview(false)}>
+          <div className="w-full bg-white rounded-t-2xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="bg-pitch-700 text-white px-5 pt-5 pb-4 rounded-t-2xl">
+              <p className="text-xs text-pitch-300 mb-1">Starting Lineup</p>
+              <h2 className="text-xl font-bold">vs {game.opponent}</h2>
+              <p className="text-pitch-300 text-sm mt-0.5">{game.formation} · Tap any player to swap</p>
+            </div>
+
+            <div className="p-4 space-y-2">
+              {lineupSlots.map((slot, idx) => {
+                const player = players.find(p => p.id === slot.playerId);
+                const isGk = slot.position === 'GK';
+                const posColor = POSITION_COLORS[slot.position] ?? 'bg-gray-500';
+                const stats = seasonStats.find(s => s.playerId === slot.playerId);
+                return (
+                  <button
+                    key={idx}
+                    onClick={() => !isGk && setPreviewPickingIdx(idx)}
+                    disabled={isGk}
+                    className="w-full flex items-center gap-3 p-3 rounded-xl border border-gray-100 bg-gray-50 active:scale-95 transition-transform text-left"
+                  >
+                    <div className={`${posColor} text-white text-xs font-bold px-2 py-1 rounded w-12 text-center shrink-0`}>
+                      {slot.position}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-sm text-gray-800">
+                          #{player?.number} {player?.name}
+                        </span>
+                        {player?.positions.includes(slot.position as Position) && (
+                          <span className="text-xs text-pitch-600 font-medium">✓ pref</span>
+                        )}
+                        {isGk && <Lock size={11} className="text-gray-400 ml-auto" />}
+                      </div>
+                      {stats && (
+                        <p className="text-xs text-gray-400 mt-0.5">
+                          {stats.goals}G · {stats.assists}A · +/-{stats.plusMinus > 0 ? '+' : ''}{stats.plusMinus} · {stats.gamesAttended} games
+                        </p>
+                      )}
+                    </div>
+                    {!isGk && <span className="text-gray-300 text-sm shrink-0">⇄</span>}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="px-4 pb-8 pt-2 space-y-2">
+              <button
+                onClick={() => { setShowPreview(false); startGame(); }}
+                className="w-full bg-pitch-700 text-white rounded-xl py-4 font-bold text-lg flex items-center justify-center gap-2 active:scale-95 transition-transform shadow-lg"
+              >
+                <ArrowRight size={22} />
+                Confirm & Kick Off
+              </button>
+              <button onClick={() => setShowPreview(false)}
+                className="w-full border border-gray-200 text-gray-600 rounded-xl py-3 text-sm font-medium">
+                ← Back to Setup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Preview Player Picker ── */}
+      {previewPickingIdx !== null && (
+        <div className="fixed inset-0 bg-black/70 flex items-end z-50" onClick={() => setPreviewPickingIdx(null)}>
+          <div className="w-full bg-white rounded-t-2xl p-5 max-h-[70vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <h3 className="font-bold text-gray-900 mb-1">
+              Swap {lineupSlots[previewPickingIdx]?.position}
+            </h3>
+            <p className="text-xs text-gray-500 mb-3">Select a replacement player</p>
+            <div className="grid grid-cols-2 gap-2">
+              {availableForPicker(previewPickingIdx).map(p => {
+                const pos = lineupSlots[previewPickingIdx]?.position;
+                const prefersThis = p.positions.includes(pos as Position);
+                const stats = seasonStats.find(s => s.playerId === p.id);
+                return (
+                  <button key={p.id} onClick={() => { assignPlayer(previewPickingIdx, p.id); setPreviewPickingIdx(null); }}
+                    className={`flex flex-col p-2.5 rounded-xl border text-left active:scale-95 ${
+                      prefersThis ? 'bg-pitch-50 border-pitch-300' : 'bg-gray-50 border-gray-200'
+                    }`}>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-bold text-sm text-gray-700">#{p.number}</span>
+                      <span className="font-medium text-sm">{p.name.split(' ')[0]}</span>
+                      {prefersThis && <span className="ml-auto text-xs text-pitch-600 font-semibold">✓</span>}
+                    </div>
+                    <div className="text-xs text-gray-400 mt-0.5">
+                      {stats ? `+/- ${stats.plusMinus > 0 ? '+' : ''}${stats.plusMinus} · ${stats.gamesAttended}G` : 'No stats yet'}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Player Picker Modal ── */}
       {pickingSlotIdx !== null && (

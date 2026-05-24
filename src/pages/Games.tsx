@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, Calendar, ChevronRight, X, Check } from 'lucide-react';
+import { Plus, Calendar, ChevronRight, X, Check, Trash2 } from 'lucide-react';
 import { useStore } from '@/store/useStore';
 import { generateId, formatDate } from '@/lib/utils';
 import type { Game, GameShift } from '@/types';
@@ -161,38 +161,53 @@ export const Games = () => {
 
       <div className="p-4 space-y-3">
         {sortedGames.map(game => (
-          <button
-            key={game.id}
-            onClick={() => navigate(
-              game.status === 'scheduled'
-                ? `/game/${game.id}/setup`
-                : `/game/${game.id}`
-            )}
-            className="w-full bg-white rounded-xl p-4 shadow-sm flex items-center gap-3 text-left active:scale-95 transition-transform"
-          >
-            <div className="w-12 h-12 bg-pitch-50 rounded-xl flex flex-col items-center justify-center shrink-0">
-              <span className="text-pitch-700 font-bold text-lg leading-none">
-                {new Date(game.date + 'T12:00:00').getDate()}
-              </span>
-              <span className="text-pitch-600 text-xs uppercase">
-                {format(new Date(game.date + 'T12:00:00'), 'MMM')}
-              </span>
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2">
-                <p className="font-semibold truncate">vs {game.opponent}</p>
-                {statusBadge(game.status)}
+          <div key={game.id} className="bg-white rounded-xl shadow-sm flex items-center">
+            <button
+              onClick={() => navigate(
+                game.status === 'scheduled'
+                  ? `/game/${game.id}/setup`
+                  : `/game/${game.id}`
+              )}
+              className="flex-1 p-4 flex items-center gap-3 text-left active:scale-95 transition-transform min-w-0"
+            >
+              <div className="w-12 h-12 bg-pitch-50 rounded-xl flex flex-col items-center justify-center shrink-0">
+                <span className="text-pitch-700 font-bold text-lg leading-none">
+                  {new Date(game.date + 'T12:00:00').getDate()}
+                </span>
+                <span className="text-pitch-600 text-xs uppercase">
+                  {format(new Date(game.date + 'T12:00:00'), 'MMM')}
+                </span>
               </div>
-              <p className="text-sm text-gray-500 mt-0.5">
-                {game.homeAway === 'home' ? 'Home' : 'Away'} · {game.formation}
-                {game.status !== 'scheduled' && ` · ${game.score.home}–${game.score.away}`}
-              </p>
-              <p className="text-xs text-gray-400 mt-0.5">
-                {game.attendance.length} attending
-              </p>
-            </div>
-            <ChevronRight className="text-gray-400 shrink-0" size={18} />
-          </button>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <p className="font-semibold truncate">vs {game.opponent}</p>
+                  {statusBadge(game.status)}
+                </div>
+                <p className="text-sm text-gray-500 mt-0.5">
+                  {game.homeAway === 'home' ? 'Home' : 'Away'} · {game.formation}
+                  {game.status !== 'scheduled' && ` · ${game.score.home}–${game.score.away}`}
+                </p>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  {game.attendance.length} attending
+                </p>
+              </div>
+              <ChevronRight className="text-gray-400 shrink-0" size={18} />
+            </button>
+            {isCoach && (
+              <button
+                onClick={e => {
+                  e.stopPropagation();
+                  if (confirm(`Delete game vs ${game.opponent}? This cannot be undone.`)) {
+                    deleteGame(game.id);
+                  }
+                }}
+                className="p-4 text-gray-300 active:text-red-500 shrink-0"
+                aria-label="Delete game"
+              >
+                <Trash2 size={17} />
+              </button>
+            )}
+          </div>
         ))}
 
         {games.length === 0 && (
