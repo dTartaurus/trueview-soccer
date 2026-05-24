@@ -3,7 +3,12 @@
     "allow": [
       "Bash(node scripts/create-placeholder-icons.mjs)",
       "Bash(npm install *)",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(git rm *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git branch *)",
+      "Bash(git push *)"
     ]
   }
 }
