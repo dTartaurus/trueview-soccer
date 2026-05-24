@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node scripts/create-placeholder-icons.mjs)",
+      "Bash(npm install *)",
+      "Bash(npm run *)"
+    ]
+  }
+}
