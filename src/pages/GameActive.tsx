@@ -483,27 +483,54 @@ export const GameActive = () => {
             {/* Edit mode */}
             {nextShiftLineup && editingNextShift && (
               <div className="px-3 py-2 space-y-2">
-                <p className="text-xs text-gray-500">Adjust the lineup for next shift</p>
+                <p className="text-xs text-gray-400">
+                  <span className="inline-block w-2 h-2 rounded-full bg-amber-500 mr-1 align-middle" />
+                  AI change &nbsp;·&nbsp;
+                  <span className="inline-block w-2 h-2 rounded-full bg-gray-600 mr-1 align-middle" />
+                  No change &nbsp;·&nbsp; Tap dropdown to override
+                </p>
                 <div className="space-y-1.5">
                   {nextShiftLineup.map(sp => {
                     const p = players.find(pl => pl.id === sp.playerId);
                     const isGk = sp.position === 'GK';
                     const color = POSITION_COLORS[sp.position] ?? 'bg-gray-600';
+                    // Is this an AI-recommended change? (player wasn't on field before)
+                    const isChange = !onFieldIds.has(sp.playerId);
+                    // Who was on the field in this position before?
+                    const prevInSlot = activeShift?.players.find(s => s.position === sp.position);
+                    const prevPlayer = prevInSlot ? players.find(pl => pl.id === prevInSlot.playerId) : null;
                     return (
-                      <div key={sp.playerId} className="flex items-center gap-2">
+                      <div key={sp.playerId}
+                        className={`rounded-lg p-2 flex items-center gap-2 ${isChange ? 'bg-amber-900/30 border border-amber-700/40' : 'bg-gray-700/30'}`}>
                         <span className={`${color} text-white text-xs font-bold px-1.5 py-0.5 rounded w-10 text-center shrink-0`}>{sp.position}</span>
-                        <span className="text-xs text-gray-300 flex-1">#{p?.number} {p?.name?.split(' ')[0]}</span>
+                        <div className="flex-1 min-w-0">
+                          {isChange && prevPlayer && (
+                            <p className="text-xs text-gray-500 leading-none mb-0.5">
+                              was: #{prevPlayer.number} {prevPlayer.name.split(' ')[0]}
+                            </p>
+                          )}
+                          <p className={`text-xs font-medium leading-none ${isChange ? 'text-amber-300' : 'text-gray-300'}`}>
+                            {isChange && <span className="mr-1">AI→</span>}
+                            #{p?.number} {p?.name?.split(' ')[0]}
+                          </p>
+                        </div>
                         {isGk ? (
-                          <span className="text-xs text-yellow-500">🔒 GK</span>
+                          <span className="text-xs text-yellow-500 shrink-0">🔒</span>
                         ) : (
                           <select
-                            className="bg-gray-700 text-white text-xs rounded px-1 py-0.5 border border-gray-600 max-w-[120px]"
+                            className="bg-gray-800 text-white text-xs rounded px-1 py-0.5 border border-gray-600 max-w-[110px] shrink-0"
                             value={sp.playerId}
                             onChange={e => swapNextShiftPlayer(sp.playerId, e.target.value)}
                           >
-                            <option value={sp.playerId}>#{p?.number} {p?.name?.split(' ')[0]}</option>
+                            <option value={sp.playerId}>#{p?.number} {p?.name?.split(' ')[0]} ✓AI</option>
+                            {/* Offer current field player as easy revert */}
+                            {isChange && prevPlayer && prevPlayer.id !== sp.playerId && (
+                              <option value={prevPlayer.id}>
+                                #{prevPlayer.number} {prevPlayer.name.split(' ')[0]} (keep)
+                              </option>
+                            )}
                             {attendingPlayers
-                              .filter(bp => !nextOnFieldIds.has(bp.id) || bp.id === sp.playerId)
+                              .filter(bp => bp.id !== sp.playerId && bp.id !== prevPlayer?.id && (!nextOnFieldIds.has(bp.id) || bp.id === sp.playerId))
                               .map(bp => (
                                 <option key={bp.id} value={bp.id}>
                                   #{bp.number} {bp.name.split(' ')[0]} ({roundTo15(minutesMap.get(bp.id) ?? 0)}m)
