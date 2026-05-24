@@ -242,7 +242,6 @@ async function handleLineupStructured(data: unknown, res: VercelResponse) {
     '4-1-4-1': 'GK, RB, RCB, LCB, LB, CDM, RM, RCM, LCM, LM, ST',
   };
   const formationPositions = positionMap[formation] ?? positionMap['4-3-3'];
-  const positionList = formationPositions.split(', ');
   const slotsToFill = Math.min(attendingCount, 11);
 
   const playerLines = players
@@ -284,31 +283,29 @@ Use the set_lineup tool to return exactly ${slotsToFill} player-position assignm
 
   const message = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
-    max_tokens: 1024,
+    max_tokens: 2048,
     system: SYSTEM,
     tools: [
       {
         name: 'set_lineup',
-        description: 'Set the starting 11 players and their positions for shift 1',
+        description: `Set the starting lineup (${slotsToFill} players) for the game`,
         input_schema: {
           type: 'object' as const,
           properties: {
             startingLineup: {
               type: 'array',
-              description: 'Exactly 11 player-position assignments',
+              description: `Array of ${slotsToFill} player-position assignments`,
               items: {
-                type: 'object',
+                type: 'object' as const,
                 properties: {
-                  playerId: { type: 'string', description: 'Player id' },
-                  position: { type: 'string', description: 'Formation position label e.g. GK, RB, ST' }
+                  playerId: { type: 'string' as const, description: 'The player id string' },
+                  position: { type: 'string' as const, description: 'Formation position e.g. GK, RB, ST' }
                 },
                 required: ['playerId', 'position']
-              },
-              minItems: 7,
-              maxItems: 11
+              }
             },
             reasoning: {
-              type: 'string',
+              type: 'string' as const,
               description: 'Brief explanation of key lineup decisions (2-4 sentences)'
             }
           },
@@ -316,7 +313,7 @@ Use the set_lineup tool to return exactly ${slotsToFill} player-position assignm
         }
       }
     ],
-    tool_choice: { type: 'tool', name: 'set_lineup' },
+    tool_choice: { type: 'tool' as const, name: 'set_lineup' },
     messages: [{ role: 'user', content: prompt }]
   });
 
@@ -359,7 +356,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const text = message.content[0].type === 'text' ? message.content[0].text : '';
     return res.status(200).json({ text });
   } catch (err) {
-    console.error('Claude API error:', err);
-    return res.status(500).json({ error: 'AI request failed' });
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('Claude API error:', msg);
+    return res.status(500).json({ error: `AI request failed: ${msg}` });
   }
 }

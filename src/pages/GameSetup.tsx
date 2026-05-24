@@ -139,8 +139,10 @@ export const GameSetup = () => {
         setAiReasoning(json.reasoning ?? '');
         setShowReasoning(true);
         setStep(2);
+      } else if (json.error) {
+        alert(json.error);
       } else {
-        alert(json.error ?? 'Could not generate a lineup. Please try again.');
+        alert('Could not generate a lineup. Please try again.');
       }
     } catch {
       alert('Could not connect to AI. Check your internet connection.');
