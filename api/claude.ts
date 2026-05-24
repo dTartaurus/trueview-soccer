@@ -10,21 +10,91 @@ Keep responses under 400 words unless doing a full season review.`;
 
 const prompts: Record<string, (data: unknown) => string> = {
   lineup: (d: unknown) => {
-    const { players, formation, teamName, opponent } = d as {
-      players: { name: string; number: number; positions: string[] }[];
+    const { players, formation, teamName, opponent, totalPlayers } = d as {
+      players: {
+        name: string;
+        number: number;
+        preferredPositions: string[];
+        gamesAttended: number;
+        totalGames: number;
+        plusMinus: number;
+        goals: number;
+        assists: number;
+        minutesPlayed: number;
+      }[];
       formation: string;
       teamName: string;
       opponent: string;
+      totalPlayers: number;
     };
-    return `Team "${teamName}" is playing vs ${opponent || 'their next opponent'} using a ${formation} formation.
 
-Available players (${players.length}):
-${players.map(p => `- #${p.number} ${p.name} | preferred: ${p.positions.join(', ') || 'not set'}`).join('\n')}
+    const playerLines = players
+      .sort((a, b) => a.number - b.number)
+      .map(p => {
+        const attendPct = p.totalGames > 0
+          ? Math.round((p.gamesAttended / p.totalGames) * 100)
+          : 0;
+        const pm = p.plusMinus >= 0 ? `+${p.plusMinus}` : `${p.plusMinus}`;
+        const pos = p.preferredPositions.length > 0
+          ? p.preferredPositions.join(', ')
+          : 'no preference set';
+        return `  #${p.number} ${p.name} | preferred: ${pos} | +/-: ${pm} | attendance: ${p.gamesAttended}/${p.totalGames} (${attendPct}%) | goals: ${p.goals} | assists: ${p.assists}`;
+      })
+      .join('\n');
 
-Please recommend:
-1. The starting 11 with positions in the ${formation} formation
-2. Suggested rotation order for the 6 shifts (15-min each across two 45-min halves)
-3. Any key tactical advice for this lineup`;
+    const positions = formation === '4-3-3'
+      ? 'GK, RB, RCB, LCB, LB, RCM, CM, LCM, RW, ST, LW'
+      : formation === '4-4-2'
+      ? 'GK, RB, RCB, LCB, LB, RM, RCM, LCM, LM, ST, CF'
+      : formation === '4-2-3-1'
+      ? 'GK, RB, RCB, LCB, LB, RCM, LCM, RW, CAM, LW, ST'
+      : formation === '3-5-2'
+      ? 'GK, RCB, CB, LCB, RWB, RCM, CM, LCM, LWB, ST, CF'
+      : 'GK, RB, RCB, LCB, LB, CDM, RM, RCM, LCM, LM, ST';
+
+    return `You are setting the lineup for "${teamName}" vs ${opponent || 'their opponent'} using a ${formation} formation.
+
+The ${formation} requires these 11 positions: ${positions}
+
+${totalPlayers} players are available today:
+${playerLines}
+
+RANKING RULES — apply in this exact order when multiple players can fill the same position:
+1. PREFERRED POSITION FIRST: A player listed as preferring a position must get priority for it.
+2. THEN PLUS/MINUS: Among players who can play a position, pick the one with the highest +/- rating (they perform better when on the field).
+3. THEN ATTENDANCE: If +/- is equal, pick the player who has attended a higher percentage of games (rewarding commitment).
+4. EQUAL PLAYING TIME: All ${totalPlayers} players must be distributed fairly across 6 shifts (15 min each). No player should sit out more than 2 full shifts.
+
+OUTPUT FORMAT — use exactly this structure:
+
+## STARTING LINEUP (Shift 1, 0–15 min)
+| Position | Player | Reason |
+|---|---|---|
+| GK | #X Name | preferred position |
+| RB | #X Name | preferred position, +/- +3 |
+... (all 11 positions)
+
+## SHIFT 2 (15–30 min) — changes only
+- Sub OUT: #X Name (Position)
+- Sub IN: #X Name (Position) — reason
+
+## SHIFT 3 (30–45 min) — changes only
+...
+
+## SHIFT 4 (45–60 min) — changes only
+...
+
+## SHIFT 5 (60–75 min) — changes only
+...
+
+## SHIFT 6 (75–90 min) — changes only
+...
+
+## BENCH for Shift 1 (${totalPlayers - 11} players)
+List the players not starting and which shift they come on.
+
+## TACTICAL NOTE
+One sentence of advice for this lineup.`;
   },
 
   formation: (d: unknown) => {
@@ -152,9 +222,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
+    // Lineup responses need more tokens to cover all 6 shifts
+    const maxTokens = type === 'lineup' ? 2048 : 1024;
+
     const message = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
+      max_tokens: maxTokens,
       system: SYSTEM,
       messages: [{ role: 'user', content: promptFn(data) }]
     });

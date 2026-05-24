@@ -1,14 +1,14 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Check, X, Users, Zap, ArrowRight } from 'lucide-react';
+import { Check, Users, Zap, ArrowRight } from 'lucide-react';
 import { useStore } from '@/store/useStore';
-import { generateId, FORMATIONS } from '@/lib/utils';
-import type { GameShift, ShiftPlayer, Position } from '@/types';
+import { FORMATIONS, computeSeasonStats } from '@/lib/utils';
+import type { Position } from '@/types';
 
 export const GameSetup = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { games, players, isCoach, updateGame, settings } = useStore();
+  const { games, players, practices, isCoach, updateGame, settings } = useStore();
 
   const game = games.find(g => g.id === id);
   const [attendance, setAttendance] = useState<Set<string>>(
@@ -16,6 +16,11 @@ export const GameSetup = () => {
   );
   const [aiLoading, setAiLoading] = useState(false);
   const [aiSuggestion, setAiSuggestion] = useState<string>('');
+
+  // Pre-compute season stats so we can rank players properly
+  const completedGames = games.filter(g => g.status === 'completed');
+  const practiceCount = (pid: string) => practices.filter(p => p.attendance.includes(pid)).length;
+  const seasonStats = computeSeasonStats(players, completedGames, practiceCount);
 
   if (!game) return <div className="p-8 text-center text-gray-400">Game not found</div>;
 
@@ -36,22 +41,38 @@ export const GameSetup = () => {
 
   const getAiLineup = async () => {
     setAiLoading(true);
+    setAiSuggestion('');
     try {
       const attending = players.filter(p => attendance.has(p.id));
+      const totalGames = completedGames.length;
+
+      // Build enriched player data with stats for ranking
+      const enrichedPlayers = attending.map(p => {
+        const stats = seasonStats.find(s => s.playerId === p.id);
+        return {
+          name: p.name,
+          number: p.number,
+          preferredPositions: p.positions,
+          gamesAttended: stats?.gamesAttended ?? 0,
+          totalGames,
+          plusMinus: stats?.plusMinus ?? 0,
+          goals: stats?.goals ?? 0,
+          assists: stats?.assists ?? 0,
+          minutesPlayed: stats?.minutesPlayed ?? 0
+        };
+      });
+
       const res = await fetch('/api/claude', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           type: 'lineup',
           data: {
-            players: attending.map(p => ({
-              name: p.name,
-              number: p.number,
-              positions: p.positions
-            })),
+            players: enrichedPlayers,
             formation: game.formation,
             teamName: settings?.teamName ?? 'Our Team',
-            opponent: game.opponent
+            opponent: game.opponent,
+            totalPlayers: attending.length
           }
         })
       });
