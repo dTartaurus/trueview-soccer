@@ -209,19 +209,132 @@ Suggest 1-3 substitutions with positions, prioritizing equal play time. Explain 
   }
 };
 
+async function handleLineupStructured(data: unknown, res: VercelResponse) {
+  const { players, formation, h1GoalkeeperId, h2GoalkeeperId, teamName, opponent } = data as {
+    players: {
+      id: string;
+      name: string;
+      number: number;
+      preferredPositions: string[];
+      gamesAttended: number;
+      totalGames: number;
+      plusMinus: number;
+      goals: number;
+      assists: number;
+    }[];
+    formation: string;
+    h1GoalkeeperId: string;
+    h2GoalkeeperId: string;
+    teamName: string;
+    opponent: string;
+  };
+
+  const positionMap: Record<string, string> = {
+    '4-3-3': 'GK, RB, RCB, LCB, LB, RCM, CM, LCM, RW, ST, LW',
+    '4-4-2': 'GK, RB, RCB, LCB, LB, RM, RCM, LCM, LM, ST, CF',
+    '4-2-3-1': 'GK, RB, RCB, LCB, LB, RCM, LCM, RW, CAM, LW, ST',
+    '3-5-2': 'GK, RCB, CB, LCB, RWB, RCM, CM, LCM, LWB, ST, CF',
+    '4-1-4-1': 'GK, RB, RCB, LCB, LB, CDM, RM, RCM, LCM, LM, ST',
+  };
+  const positions = positionMap[formation] ?? positionMap['4-3-3'];
+
+  const h1Gk = players.find(p => p.id === h1GoalkeeperId);
+  const playerLines = players
+    .sort((a, b) => a.number - b.number)
+    .map(p => {
+      const attendPct = p.totalGames > 0
+        ? Math.round((p.gamesAttended / p.totalGames) * 100)
+        : 0;
+      const pm = p.plusMinus >= 0 ? `+${p.plusMinus}` : `${p.plusMinus}`;
+      const pos = p.preferredPositions.length > 0
+        ? p.preferredPositions.join(', ')
+        : 'flexible';
+      const isH1Gk = p.id === h1GoalkeeperId ? ' [H1 GK - must start in GK]' : '';
+      return `  id:${p.id} | #${p.number} ${p.name} | preferred: ${pos} | +/-: ${pm} | attendance: ${p.gamesAttended}/${p.totalGames} (${attendPct}%) | goals: ${p.goals}${isH1Gk}`;
+    })
+    .join('\n');
+
+  const prompt = `Set the starting lineup for "${teamName}" vs ${opponent || 'their opponent'} using a ${formation} formation.
+
+Formation positions needed (exactly 11): ${positions}
+
+The H1 goalkeeper is ${h1Gk ? `#${h1Gk.number} ${h1Gk.name} (id: ${h1GoalkeeperId})` : `id: ${h1GoalkeeperId}`} — place them at GK.
+
+Available players (${players.length} attending):
+${playerLines}
+
+RULES for assigning positions (apply in order):
+1. H1 goalkeeper MUST be assigned GK
+2. Prefer players in their listed preferred positions
+3. Among candidates for same position: higher +/- wins; ties broken by higher attendance %
+4. Every attending player should get some playing time across the 6 shifts — this is just the starting 11
+
+Use the set_lineup tool to return exactly 11 assignments and a brief reasoning string.`;
+
+  const message = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 1024,
+    system: SYSTEM,
+    tools: [
+      {
+        name: 'set_lineup',
+        description: 'Set the starting 11 players and their positions for shift 1',
+        input_schema: {
+          type: 'object' as const,
+          properties: {
+            startingLineup: {
+              type: 'array',
+              description: 'Exactly 11 player-position assignments',
+              items: {
+                type: 'object',
+                properties: {
+                  playerId: { type: 'string', description: 'Player id' },
+                  position: { type: 'string', description: 'Formation position label e.g. GK, RB, ST' }
+                },
+                required: ['playerId', 'position']
+              },
+              minItems: 11,
+              maxItems: 11
+            },
+            reasoning: {
+              type: 'string',
+              description: 'Brief explanation of key lineup decisions (2-4 sentences)'
+            }
+          },
+          required: ['startingLineup', 'reasoning']
+        }
+      }
+    ],
+    tool_choice: { type: 'tool', name: 'set_lineup' },
+    messages: [{ role: 'user', content: prompt }]
+  });
+
+  const toolUse = message.content.find(b => b.type === 'tool_use');
+  if (!toolUse || toolUse.type !== 'tool_use') {
+    return res.status(500).json({ error: 'AI did not return a structured lineup' });
+  }
+
+  const result = toolUse.input as { startingLineup: { playerId: string; position: string }[]; reasoning: string };
+  return res.status(200).json(result);
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
   const { type, data } = req.body as { type: string; data: unknown };
-  const promptFn = prompts[type];
-
-  if (!promptFn) {
-    return res.status(400).json({ error: `Unknown type: ${type}` });
-  }
 
   try {
+    if (type === 'lineup_structured') {
+      return await handleLineupStructured(data, res);
+    }
+
+    const promptFn = prompts[type];
+    if (!promptFn) {
+      return res.status(400).json({ error: `Unknown type: ${type}` });
+    }
+
     // Lineup responses need more tokens to cover all 6 shifts
     const maxTokens = type === 'lineup' ? 2048 : 1024;
 

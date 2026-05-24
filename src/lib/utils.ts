@@ -1,5 +1,5 @@
 import { format, parseISO } from 'date-fns';
-import type { Game, Player, GameShift, PlayerSeasonStats, GameEvent } from '@/types';
+import type { Game, Player, GameShift, PlayerSeasonStats, ShiftPlayer, Position } from '@/types';
 
 export const generateId = () =>
   `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -129,6 +129,90 @@ export const FORMATIONS: Record<string, string[]> = {
   '4-2-3-1': ['GK', 'RB', 'RCB', 'LCB', 'LB', 'RCM', 'LCM', 'RW', 'CAM', 'LW', 'ST'],
   '3-5-2': ['GK', 'RCB', 'CB', 'LCB', 'RWB', 'RCM', 'CM', 'LCM', 'LWB', 'ST', 'CF'],
   '4-1-4-1': ['GK', 'RB', 'RCB', 'LCB', 'LB', 'CDM', 'RM', 'RCM', 'LCM', 'LM', 'ST'],
+};
+
+export const getFormationPositions = (formation: string): string[] =>
+  FORMATIONS[formation] ?? FORMATIONS['4-3-3'];
+
+// Returns minutes played per player based on completed + active shifts
+export const computePlayerMinutes = (game: Game, currentGameMinute: number): Map<string, number> => {
+  const minutes = new Map<string, number>();
+  for (const shift of game.shifts) {
+    if (shift.status === 'completed') {
+      for (const sp of shift.players) {
+        minutes.set(sp.playerId, (minutes.get(sp.playerId) ?? 0) + (shift.endMinute - shift.startMinute));
+      }
+    } else if (shift.status === 'active') {
+      const partial = Math.max(0, currentGameMinute - shift.startMinute);
+      for (const sp of shift.players) {
+        minutes.set(sp.playerId, (minutes.get(sp.playerId) ?? 0) + partial);
+      }
+    }
+  }
+  return minutes;
+};
+
+// Suggests the 11 players for the next shift, prioritising least time played.
+// GK is locked to the correct half. Off-half GK sits out.
+export const suggestNextShift = (
+  game: Game,
+  allPlayers: Player[],
+  nextShiftNum: number,
+  currentGameMinute: number
+): ShiftPlayer[] => {
+  const isH2 = nextShiftNum > 3;
+  const activeGkId = isH2 ? game.h2GoalkeeperId : game.h1GoalkeeperId;
+  const offHalfGkId = isH2 ? game.h1GoalkeeperId : game.h2GoalkeeperId;
+  if (!activeGkId) return [];
+
+  const attending = allPlayers.filter(p => game.attendance.includes(p.id));
+  const minutesMap = computePlayerMinutes(game, currentGameMinute);
+
+  // Outfield candidates: not the active GK; off-half GK excluded unless same player
+  const outfield = attending.filter(p => {
+    if (p.id === activeGkId) return false;
+    if (p.id === offHalfGkId && offHalfGkId !== activeGkId) return false;
+    return true;
+  });
+
+  // Sort by minutes ascending (least time = highest priority to come on)
+  const sorted = [...outfield].sort((a, b) =>
+    (minutesMap.get(a.id) ?? 0) - (minutesMap.get(b.id) ?? 0)
+  );
+  const selected = sorted.slice(0, 10);
+
+  const formationOutfieldPos = getFormationPositions(game.formation).filter(p => p !== 'GK');
+  const prevShiftNum = (nextShiftNum - 1) as 1 | 2 | 3 | 4 | 5 | 6;
+  const prevPlayers = game.shifts.find(s => s.shiftNumber === prevShiftNum)?.players ?? [];
+
+  const result: ShiftPlayer[] = [{ playerId: activeGkId, position: 'GK' as Position }];
+  const usedPositions = new Set<string>();
+  const assignedIds = new Set<string>();
+
+  // Keep staying players in their same position first
+  for (const prev of prevPlayers) {
+    if (prev.position === 'GK') continue;
+    if (selected.some(p => p.id === prev.playerId)) {
+      result.push(prev);
+      usedPositions.add(prev.position);
+      assignedIds.add(prev.playerId);
+    }
+  }
+
+  // Assign new players to remaining positions by preference
+  const newPlayers = selected.filter(p => !assignedIds.has(p.id));
+  const emptyPos = formationOutfieldPos.filter(p => !usedPositions.has(p));
+
+  for (const player of newPlayers) {
+    if (emptyPos.length === 0) break;
+    const full = allPlayers.find(p => p.id === player.id);
+    const preferred = full?.positions.find(pos => emptyPos.includes(pos)) as Position | undefined;
+    const pos = preferred ?? (emptyPos[0] as Position);
+    emptyPos.splice(emptyPos.indexOf(pos), 1);
+    result.push({ playerId: player.id, position: pos });
+  }
+
+  return result;
 };
 
 export const POSITION_LABELS: Partial<Record<string, string>> = {

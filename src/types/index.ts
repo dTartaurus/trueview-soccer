@@ -57,6 +57,10 @@ export interface Game {
   formation: string;
   notes: string;
   createdAt: string;
+  // Lineup planning
+  presetLineup: ShiftPlayer[];
+  h1GoalkeeperId: string;
+  h2GoalkeeperId: string;
 }
 
 export interface Practice {

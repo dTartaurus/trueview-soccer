@@ -61,7 +61,10 @@ export const Games = () => {
       currentHalf: 1,
       formation: form.formation,
       notes: '',
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      presetLineup: [],
+      h1GoalkeeperId: '',
+      h2GoalkeeperId: ''
     };
     await saveGame(game);
     setShowForm(false);
