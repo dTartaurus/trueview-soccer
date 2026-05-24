@@ -324,6 +324,136 @@ Use the set_lineup tool to return exactly ${slotsToFill} player-position assignm
   return res.status(200).json(result);
 }
 
+async function handleShiftRecommendation(data: unknown, res: VercelResponse, anthropic: Anthropic) {
+  const {
+    nextShiftNumber, formation, teamName, opponent, gameMinute,
+    currentShiftPlayers, benchPlayers, allPlayers, activeGkId, isSecondHalf, slotsCount,
+  } = data as {
+    nextShiftNumber: number;
+    formation: string;
+    teamName: string;
+    opponent: string;
+    gameMinute: number;
+    currentShiftPlayers: { playerId: string; name: string; number: number; position: string; minutesThisGame: number }[];
+    benchPlayers: { playerId: string; name: string; number: number; minutesThisGame: number; mustPlayNext: boolean }[];
+    allPlayers: {
+      id: string; name: string; number: number; preferredPositions: string[]; minutesThisGame: number;
+      positionStats: { position: string; minutesPlayed: number; plusMinus: number; plusMinusPer90: number; goals: number; assists: number }[];
+    }[];
+    activeGkId: string;
+    isSecondHalf: boolean;
+    slotsCount: number;
+  };
+
+  const positionMap: Record<string, string> = {
+    '4-3-3': 'GK, RB, RCB, LCB, LB, RCM, CM, LCM, RW, ST, LW',
+    '4-4-2': 'GK, RB, RCB, LCB, LB, RM, RCM, LCM, LM, ST, CF',
+    '4-2-3-1': 'GK, RB, RCB, LCB, LB, RCM, LCM, RW, CAM, LW, ST',
+    '3-5-2': 'GK, RCB, CB, LCB, RWB, RCM, CM, LCM, LWB, ST, CF',
+    '4-1-4-1': 'GK, RB, RCB, LCB, LB, CDM, RM, RCM, LCM, LM, ST',
+  };
+  const formationPositions = positionMap[formation] ?? positionMap['4-3-3'];
+  const activeGk = allPlayers.find(p => p.id === activeGkId);
+  const mustPlayList = benchPlayers.filter(p => p.mustPlayNext);
+
+  const currentLines = currentShiftPlayers
+    .sort((a, b) => a.number - b.number)
+    .map(p => `  ON   #${p.number} ${p.name} | ${p.position} | ${p.minutesThisGame}min`)
+    .join('\n');
+
+  const benchLines = benchPlayers.length > 0
+    ? benchPlayers.sort((a, b) => a.number - b.number)
+        .map(p => `  BENCH #${p.number} ${p.name} | ${p.minutesThisGame}min${p.mustPlayNext ? ' ★MUST PLAY' : ''}`)
+        .join('\n')
+    : '  (none)';
+
+  const allPlayerLines = allPlayers
+    .sort((a, b) => a.number - b.number)
+    .map(p => {
+      const preferred = p.preferredPositions.length > 0 ? p.preferredPositions.join(', ') : 'flexible';
+      const statsLines = p.positionStats.length > 0
+        ? p.positionStats.map(s =>
+            `      ${s.position}: +/-${s.plusMinus} | ${s.plusMinusPer90 >= 0 ? '+' : ''}${s.plusMinusPer90.toFixed(2)}/90min | ${s.goals}G ${s.assists}A in ${s.minutesPlayed}min`
+          ).join('\n')
+        : '      No match history yet';
+      return `  id:${p.id} #${p.number} ${p.name} | ${p.minutesThisGame}min this game | preferred: ${preferred}\n${statsLines}`;
+    })
+    .join('\n\n');
+
+  const mustPlayBlock = mustPlayList.length > 0
+    ? mustPlayList.map((p, i) => `${i + 2}. id:${p.id} (#${p.number} ${p.name}) was benched last shift — MUST be on field.`).join('\n')
+    : '2. No consecutive-bench violations to resolve.';
+
+  const prompt = `You are coaching "${teamName}" vs ${opponent}. Recommend the Shift ${nextShiftNumber} lineup (minutes ${(nextShiftNumber - 1) * 15}–${nextShiftNumber * 15}) using a ${formation} formation.
+
+Formation positions: ${formationPositions}
+Game minute now: ${gameMinute} | Half: ${isSecondHalf ? '2nd' : '1st'}
+GK locked: id:${activeGkId} (${activeGk?.name ?? ''}) — stays at GK, do not rotate.
+
+CURRENT SHIFT ${nextShiftNumber - 1}:
+${currentLines}
+
+BENCH:
+${benchLines}
+
+HARD CONSTRAINTS (must be satisfied):
+1. Keep id:${activeGkId} at GK.
+${mustPlayBlock}
+
+OPTIMIZATION (apply after constraints, in order):
+1. EQUALIZE TIME: Bring on players with fewer minutes first. Everyone should converge toward equal game time.
+2. MAXIMIZE +/-: Among players with similar game time, favour those with higher +/-/90min in the slot they'll fill.
+3. PREFERRED POSITIONS: Place players in preferred positions when possible.
+
+FULL PLAYER DATA:
+${allPlayerLines}
+
+Return exactly ${slotsCount} assignments using set_lineup.`;
+
+  const message = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 2048,
+    system: SYSTEM,
+    tools: [
+      {
+        name: 'set_lineup',
+        description: `Shift ${nextShiftNumber} lineup recommendation`,
+        input_schema: {
+          type: 'object' as const,
+          properties: {
+            startingLineup: {
+              type: 'array' as const,
+              description: `${slotsCount} player-position assignments`,
+              items: {
+                type: 'object' as const,
+                properties: {
+                  playerId: { type: 'string' as const },
+                  position: { type: 'string' as const },
+                },
+                required: ['playerId', 'position'],
+              },
+            },
+            reasoning: {
+              type: 'string' as const,
+              description: 'Who changed, why, and how time is being equalised',
+            },
+          },
+          required: ['startingLineup', 'reasoning'],
+        },
+      },
+    ],
+    tool_choice: { type: 'tool' as const, name: 'set_lineup' },
+    messages: [{ role: 'user', content: prompt }],
+  });
+
+  const toolUse = message.content.find(b => b.type === 'tool_use');
+  if (!toolUse || toolUse.type !== 'tool_use') {
+    return res.status(500).json({ error: 'AI did not return a structured lineup' });
+  }
+  const result = toolUse.input as { startingLineup: { playerId: string; position: string }[]; reasoning: string };
+  return res.status(200).json(result);
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -340,6 +470,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     if (type === 'lineup_structured') {
       return await handleLineupStructured(data, res, anthropic);
+    }
+    if (type === 'shift_recommendation') {
+      return await handleShiftRecommendation(data, res, anthropic);
     }
 
     const promptFn = prompts[type];
