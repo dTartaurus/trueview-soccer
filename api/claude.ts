@@ -1,8 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import Anthropic from '@anthropic-ai/sdk';
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
 const SYSTEM = `You are an expert youth soccer coach assistant for a boys under-14 house league team.
 Give practical, age-appropriate, encouraging advice. Be concise and specific.
 Format recommendations as clear bullet points or numbered lists when listing drills or positions.
@@ -209,7 +207,7 @@ Suggest 1-3 substitutions with positions, prioritizing equal play time. Explain 
   }
 };
 
-async function handleLineupStructured(data: unknown, res: VercelResponse) {
+async function handleLineupStructured(data: unknown, res: VercelResponse, anthropic: Anthropic) {
   const { players, formation, teamName, opponent, attendingCount } = data as {
     players: {
       id: string;
@@ -331,11 +329,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: 'ANTHROPIC_API_KEY is not set in Vercel environment variables' });
+  }
+
+  const anthropic = new Anthropic({ apiKey });
   const { type, data } = req.body as { type: string; data: unknown };
 
   try {
     if (type === 'lineup_structured') {
-      return await handleLineupStructured(data, res);
+      return await handleLineupStructured(data, res, anthropic);
     }
 
     const promptFn = prompts[type];
@@ -343,7 +347,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: `Unknown type: ${type}` });
     }
 
-    // Lineup responses need more tokens to cover all 6 shifts
     const maxTokens = type === 'lineup' ? 2048 : 1024;
 
     const message = await anthropic.messages.create({
