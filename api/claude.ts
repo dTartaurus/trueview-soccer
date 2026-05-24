@@ -210,23 +210,28 @@ Suggest 1-3 substitutions with positions, prioritizing equal play time. Explain 
 };
 
 async function handleLineupStructured(data: unknown, res: VercelResponse) {
-  const { players, formation, h1GoalkeeperId, h2GoalkeeperId, teamName, opponent } = data as {
+  const { players, formation, teamName, opponent, attendingCount } = data as {
     players: {
       id: string;
       name: string;
       number: number;
       preferredPositions: string[];
-      gamesAttended: number;
-      totalGames: number;
-      plusMinus: number;
-      goals: number;
-      assists: number;
+      positionStats: {
+        position: string;
+        minutesPlayed: number;
+        goals: number;
+        assists: number;
+        plusMinus: number;
+        goalsPerMinute: number;
+        assistsPerMinute: number;
+      }[];
+      totalGamesAttended: number;
+      totalMinutesPlayed: number;
     }[];
     formation: string;
-    h1GoalkeeperId: string;
-    h2GoalkeeperId: string;
     teamName: string;
     opponent: string;
+    attendingCount: number;
   };
 
   const positionMap: Record<string, string> = {
@@ -236,40 +241,46 @@ async function handleLineupStructured(data: unknown, res: VercelResponse) {
     '3-5-2': 'GK, RCB, CB, LCB, RWB, RCM, CM, LCM, LWB, ST, CF',
     '4-1-4-1': 'GK, RB, RCB, LCB, LB, CDM, RM, RCM, LCM, LM, ST',
   };
-  const positions = positionMap[formation] ?? positionMap['4-3-3'];
+  const formationPositions = positionMap[formation] ?? positionMap['4-3-3'];
+  const positionList = formationPositions.split(', ');
+  const slotsToFill = Math.min(attendingCount, 11);
 
-  const h1Gk = players.find(p => p.id === h1GoalkeeperId);
   const playerLines = players
     .sort((a, b) => a.number - b.number)
     .map(p => {
-      const attendPct = p.totalGames > 0
-        ? Math.round((p.gamesAttended / p.totalGames) * 100)
-        : 0;
-      const pm = p.plusMinus >= 0 ? `+${p.plusMinus}` : `${p.plusMinus}`;
-      const pos = p.preferredPositions.length > 0
-        ? p.preferredPositions.join(', ')
-        : 'flexible';
-      const isH1Gk = p.id === h1GoalkeeperId ? ' [H1 GK - must start in GK]' : '';
-      return `  id:${p.id} | #${p.number} ${p.name} | preferred: ${pos} | +/-: ${pm} | attendance: ${p.gamesAttended}/${p.totalGames} (${attendPct}%) | goals: ${p.goals}${isH1Gk}`;
+      const preferred = p.preferredPositions.length > 0 ? p.preferredPositions.join(', ') : 'flexible';
+      const statsLines = p.positionStats.length > 0
+        ? p.positionStats.map(s =>
+            `      ${s.position}: ${s.minutesPlayed}min | ${s.goals}G | ${s.assists}A | +/-${s.plusMinus} | ${(s.goalsPerMinute * 90).toFixed(2)}G/90 | ${(s.assistsPerMinute * 90).toFixed(2)}A/90`
+          ).join('\n')
+        : '      No match history yet';
+      return `  id:${p.id} | #${p.number} ${p.name}
+    preferred positions: ${preferred}
+    total games: ${p.totalGamesAttended} | total minutes: ${p.totalMinutesPlayed}
+    performance by position:\n${statsLines}`;
     })
-    .join('\n');
+    .join('\n\n');
 
-  const prompt = `Set the starting lineup for "${teamName}" vs ${opponent || 'their opponent'} using a ${formation} formation.
+  const prompt = `You are the coach of "${teamName}", a U14 boys house league team. Set the optimal starting lineup for your game vs ${opponent || 'your opponent'} using a ${formation} formation.
 
-Formation positions needed (exactly 11): ${positions}
+Formation positions available: ${formationPositions}
+Players attending today: ${attendingCount}
+Starting lineup should have: ${slotsToFill} players (fill the ${slotsToFill} most important positions for this formation)
 
-The H1 goalkeeper is ${h1Gk ? `#${h1Gk.number} ${h1Gk.name} (id: ${h1GoalkeeperId})` : `id: ${h1GoalkeeperId}`} — place them at GK.
-
-Available players (${players.length} attending):
+PLAYER DATA (${players.length} players):
 ${playerLines}
 
-RULES for assigning positions (apply in order):
-1. H1 goalkeeper MUST be assigned GK
-2. Prefer players in their listed preferred positions
-3. Among candidates for same position: higher +/- wins; ties broken by higher attendance %
-4. Every attending player should get some playing time across the 6 shifts — this is just the starting 11
+OPTIMIZATION RULES (apply in this order for each position):
+1. PREFERRED POSITION: Strongly prefer players who list this as a preferred position.
+2. POSITION-SPECIFIC PERFORMANCE: Among candidates, rank by their actual stats IN THIS POSITION:
+   - Higher plus/minus in this position = better fit
+   - Higher goals/90 minutes = better for attacking roles (ST, CF, LW, RW, CAM)
+   - Higher assists/90 minutes = better for creative roles (CAM, CM, LW, RW)
+   - Defensive positions (GK, CB, LCB, RCB, LB, RB): prioritise positive plus/minus
+3. If a player has NO history in a position but it's their preferred, they still get priority over someone with bad stats.
+4. Distribute positions logically — don't stack attackers in defensive slots.
 
-Use the set_lineup tool to return exactly 11 assignments and a brief reasoning string.`;
+Use the set_lineup tool to return exactly ${slotsToFill} player-position assignments plus a 2-4 sentence reasoning summary explaining the key decisions.`;
 
   const message = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
@@ -293,7 +304,7 @@ Use the set_lineup tool to return exactly 11 assignments and a brief reasoning s
                 },
                 required: ['playerId', 'position']
               },
-              minItems: 11,
+              minItems: 7,
               maxItems: 11
             },
             reasoning: {

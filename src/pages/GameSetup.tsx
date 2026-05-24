@@ -1,8 +1,8 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Check, Users, Zap, ArrowRight, Lock, ChevronDown, Eye } from 'lucide-react';
+import { Check, Users, Zap, ArrowRight, ChevronDown, ChevronUp, ArrowLeft } from 'lucide-react';
 import { useStore } from '@/store/useStore';
-import { computeSeasonStats, getFormationPositions } from '@/lib/utils';
+import { computeSeasonStats, computePlayerPositionStats, getFormationPositions } from '@/lib/utils';
 import type { ShiftPlayer, Position } from '@/types';
 
 type LineupSlot = { position: string; playerId: string };
@@ -23,37 +23,41 @@ export const GameSetup = () => {
 
   const game = games.find(g => g.id === id);
 
+  const [step, setStep] = useState<1 | 2>(1);
   const [attendance, setAttendance] = useState<Set<string>>(new Set(game?.attendance ?? []));
-  const [h1Gk, setH1Gk] = useState(game?.h1GoalkeeperId ?? '');
-  const [h2Gk, setH2Gk] = useState(game?.h2GoalkeeperId ?? '');
   const [lineupSlots, setLineupSlots] = useState<LineupSlot[]>([]);
-  const [pickingSlotIdx, setPickingSlotIdx] = useState<number | null>(null);
+  const [h2Gk, setH2Gk] = useState(game?.h2GoalkeeperId ?? '');
   const [aiLoading, setAiLoading] = useState(false);
-  const [aiText, setAiText] = useState('');
-  const [showAiText, setShowAiText] = useState(false);
-  const [showPreview, setShowPreview] = useState(false);
-  const [previewPickingIdx, setPreviewPickingIdx] = useState<number | null>(null);
+  const [aiReasoning, setAiReasoning] = useState('');
+  const [showReasoning, setShowReasoning] = useState(false);
+  const [pickingSlotIdx, setPickingSlotIdx] = useState<number | null>(null);
 
-  // Initialise lineup slots from formation (or existing preset)
   useEffect(() => {
     if (!game) return;
-    if (game.presetLineup?.length === 11) {
-      setLineupSlots(game.presetLineup.map(sp => ({ position: sp.position, playerId: sp.playerId })));
+    const positions = getFormationPositions(game.formation);
+    if (game.presetLineup?.length >= 7) {
+      const slotMap = new Map(game.presetLineup.map(sp => [sp.position as string, sp.playerId]));
+      setLineupSlots(positions.map(pos => ({ position: pos, playerId: slotMap.get(pos) ?? '' })));
+      setStep(2);
     } else {
-      const positions = getFormationPositions(game.formation);
       setLineupSlots(positions.map(pos => ({ position: pos, playerId: '' })));
     }
   }, [game?.id]);
 
-  // Auto-fill GK slot when H1 GK changes
-  useEffect(() => {
-    if (!h1Gk) return;
-    setLineupSlots(prev => prev.map(slot =>
-      slot.position === 'GK' ? { ...slot, playerId: h1Gk } : slot
-    ));
-  }, [h1Gk]);
-
   if (!game) return <div className="p-8 text-center text-gray-400">Game not found</div>;
+
+  const sortedAll = [...players].sort((a, b) => a.number - b.number);
+  const attending = players.filter(p => attendance.has(p.id)).sort((a, b) => a.number - b.number);
+
+  const completedGames = games.filter(g => g.status === 'completed');
+  const positionStatsMap = computePlayerPositionStats(completedGames);
+  const practiceCount = (pid: string) => practices.filter(p => p.attendance.includes(pid)).length;
+  const seasonStats = computeSeasonStats(players, completedGames, practiceCount);
+
+  const assignedIds = new Set(lineupSlots.filter(s => s.playerId).map(s => s.playerId));
+  const filledCount = lineupSlots.filter(s => s.playerId).length;
+  const h1GkId = lineupSlots.find(s => s.position === 'GK')?.playerId ?? '';
+  const benchPlayers = attending.filter(p => !assignedIds.has(p.id));
 
   const toggleAttendance = (pid: string) => {
     setAttendance(prev => {
@@ -63,54 +67,47 @@ export const GameSetup = () => {
     });
   };
 
-  // Season stats for ranking in AI call
-  const completedGames = games.filter(g => g.status === 'completed');
-  const practiceCount = (pid: string) => practices.filter(p => p.attendance.includes(pid)).length;
-  const seasonStats = computeSeasonStats(players, completedGames, practiceCount);
-
-  const attending = players.filter(p => attendance.has(p.id)).sort((a, b) => a.number - b.number);
-
-  // Players not yet assigned to any slot (for the picker)
-  const assignedIds = new Set(lineupSlots.filter(s => s.playerId).map(s => s.playerId));
-  const availableForPicker = (slotIdx: number) => {
-    const slotPos = lineupSlots[slotIdx]?.position;
-    // GK slot handled by h1Gk dropdown, shouldn't be manually picked
-    return attending.filter(p => {
-      if (p.id === lineupSlots[slotIdx]?.playerId) return true; // current selection always shown
-      if (assignedIds.has(p.id)) return false; // already in another slot
-      return true;
-    });
-  };
-
   const assignPlayer = (slotIdx: number, playerId: string) => {
     setLineupSlots(prev => prev.map((s, i) => i === slotIdx ? { ...s, playerId } : s));
     setPickingSlotIdx(null);
   };
 
   const clearSlot = (slotIdx: number) => {
-    const slot = lineupSlots[slotIdx];
-    if (slot.position === 'GK') return; // GK controlled by picker
     setLineupSlots(prev => prev.map((s, i) => i === slotIdx ? { ...s, playerId: '' } : s));
   };
 
+  const availableForPicker = (slotIdx: number) =>
+    attending.filter(p =>
+      p.id === lineupSlots[slotIdx]?.playerId || !assignedIds.has(p.id)
+    );
+
   // ── AI Lineup ───────────────────────────────────────────────────────────────
   const getAiLineup = async () => {
-    if (!h1Gk) { alert('Please select a 1st Half Goalkeeper first.'); return; }
     setAiLoading(true);
-    setAiText('');
+    setAiReasoning('');
     try {
       const enriched = attending.map(p => {
-        const s = seasonStats.find(st => st.playerId === p.id);
+        const posStats = positionStatsMap.get(p.id);
+        const positionStats = posStats
+          ? Array.from(posStats.entries()).map(([pos, stat]) => ({
+              position: pos,
+              minutesPlayed: stat.minutesPlayed,
+              goals: stat.goals,
+              assists: stat.assists,
+              plusMinus: stat.plusMinus,
+              goalsPerMinute: stat.minutesPlayed > 0 ? +(stat.goals / stat.minutesPlayed).toFixed(4) : 0,
+              assistsPerMinute: stat.minutesPlayed > 0 ? +(stat.assists / stat.minutesPlayed).toFixed(4) : 0,
+            }))
+          : [];
+        const totals = seasonStats.find(s => s.playerId === p.id);
         return {
           id: p.id,
           name: p.name,
           number: p.number,
           preferredPositions: p.positions,
-          gamesAttended: s?.gamesAttended ?? 0,
-          totalGames: completedGames.length,
-          plusMinus: s?.plusMinus ?? 0,
-          goals: s?.goals ?? 0,
-          assists: s?.assists ?? 0,
+          positionStats,
+          totalGamesAttended: totals?.gamesAttended ?? 0,
+          totalMinutesPlayed: totals?.minutesPlayed ?? 0,
         };
       });
 
@@ -122,59 +119,52 @@ export const GameSetup = () => {
           data: {
             players: enriched,
             formation: game.formation,
-            h1GoalkeeperId: h1Gk,
-            h2GoalkeeperId: h2Gk || h1Gk,
             teamName: settings?.teamName ?? 'Our Team',
             opponent: game.opponent,
+            attendingCount: attending.length,
           }
         })
       });
 
       const json = await res.json();
 
-      if (json.startingLineup?.length === 11) {
-        // Fill lineup slots from AI response
+      if (Array.isArray(json.startingLineup) && json.startingLineup.length >= 7) {
         const positions = getFormationPositions(game.formation);
         const newSlots: LineupSlot[] = positions.map(pos => {
-          const assigned = (json.startingLineup as {playerId:string; position:string}[])
+          const hit = (json.startingLineup as { playerId: string; position: string }[])
             .find(a => a.position === pos);
-          return { position: pos, playerId: assigned?.playerId ?? '' };
+          return { position: pos, playerId: hit?.playerId ?? '' };
         });
         setLineupSlots(newSlots);
-        setAiText(json.reasoning ?? '');
-        setShowAiText(true);
+        setAiReasoning(json.reasoning ?? '');
+        setShowReasoning(true);
+        setStep(2);
       } else {
-        setAiText(json.error ?? 'AI could not generate a lineup. Try again.');
-        setShowAiText(true);
+        alert(json.error ?? 'Could not generate a lineup. Please try again.');
       }
     } catch {
-      setAiText('Could not connect to AI. Check your internet connection.');
-      setShowAiText(true);
+      alert('Could not connect to AI. Check your internet connection.');
     } finally {
       setAiLoading(false);
     }
   };
 
   // ── Start Game ──────────────────────────────────────────────────────────────
-  const filledCount = lineupSlots.filter(s => s.playerId).length;
-  const canStart = attendance.size >= 7 && filledCount === 11 && !!h1Gk;
+  const canStart = filledCount >= 7 && !!h1GkId;
 
   const startGame = async () => {
     const preset: ShiftPlayer[] = lineupSlots
       .filter(s => s.playerId)
       .map(s => ({ playerId: s.playerId, position: s.position as Position }));
 
-    // Activate Shift 1 immediately with the preset lineup
     const shifts = game.shifts.map(s =>
-      s.shiftNumber === 1
-        ? { ...s, status: 'active' as const, players: preset }
-        : s
+      s.shiftNumber === 1 ? { ...s, status: 'active' as const, players: preset } : s
     );
 
     await updateGame(game.id, {
       attendance: Array.from(attendance),
-      h1GoalkeeperId: h1Gk,
-      h2GoalkeeperId: h2Gk || h1Gk,
+      h1GoalkeeperId: h1GkId,
+      h2GoalkeeperId: h2Gk || h1GkId,
       presetLineup: preset,
       shifts,
       status: 'first-half',
@@ -185,308 +175,304 @@ export const GameSetup = () => {
     navigate(`/game/${game.id}`);
   };
 
-  const sortedAll = [...players].sort((a, b) => a.number - b.number);
+  // ────────────────────────────────────────────────────────────────────────────
+  // STEP 1 — Attendance
+  // ────────────────────────────────────────────────────────────────────────────
+  if (step === 1) {
+    return (
+      <div className="min-h-screen bg-gray-50 pb-10">
+        {/* Header */}
+        <div className="bg-pitch-700 px-4 pt-12 pb-5 text-white">
+          <button onClick={() => navigate('/games')} className="text-pitch-200 text-sm mb-3">← Back</button>
+          <h1 className="text-2xl font-bold">vs {game.opponent}</h1>
+          <p className="text-pitch-200 text-sm mt-1">
+            {game.date} · {game.homeAway === 'home' ? 'Home' : 'Away'} · {game.formation}
+          </p>
+        </div>
 
+        <div className="p-4 space-y-4">
+          {/* Attendance card */}
+          <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
+            <div className="px-4 pt-4 pb-3 flex items-center justify-between border-b border-gray-100">
+              <div className="flex items-center gap-2">
+                <Users size={18} className="text-pitch-700" />
+                <h2 className="font-bold text-gray-800">Who's here today?</h2>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-sm font-semibold text-pitch-700">{attendance.size} selected</span>
+                <button onClick={() => setAttendance(new Set(players.map(p => p.id)))}
+                  className="text-xs text-pitch-700 font-medium bg-pitch-50 px-2 py-1 rounded-lg">All</button>
+                <button onClick={() => setAttendance(new Set())}
+                  className="text-xs text-gray-400 font-medium bg-gray-50 px-2 py-1 rounded-lg">Clear</button>
+              </div>
+            </div>
+            <div className="p-3 grid grid-cols-2 gap-2">
+              {sortedAll.map(player => {
+                const present = attendance.has(player.id);
+                return (
+                  <button
+                    key={player.id}
+                    onClick={() => toggleAttendance(player.id)}
+                    className={`flex items-center gap-3 p-3 rounded-xl border-2 transition-colors text-left ${
+                      present
+                        ? 'bg-pitch-50 border-pitch-400 text-pitch-900'
+                        : 'bg-gray-50 border-transparent text-gray-500'
+                    }`}
+                  >
+                    <div className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold shrink-0 transition-colors ${
+                      present ? 'bg-pitch-700 text-white' : 'bg-gray-200 text-gray-500'
+                    }`}>
+                      {present ? <Check size={14} /> : player.number}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="font-semibold text-sm truncate">{player.name.split(' ')[0]}</p>
+                      <p className="text-xs text-gray-400">#{player.number}</p>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Recommend button */}
+          <div className="space-y-2">
+            {attendance.size < 7 && (
+              <p className="text-center text-sm text-gray-400">
+                Select at least 7 players to continue
+              </p>
+            )}
+            <button
+              onClick={getAiLineup}
+              disabled={attendance.size < 7 || aiLoading}
+              className="w-full bg-amber-500 text-white rounded-2xl py-4 font-bold text-lg flex items-center justify-center gap-3 disabled:opacity-40 active:scale-95 transition-transform shadow-md"
+            >
+              {aiLoading ? (
+                <>
+                  <span className="w-5 h-5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                  Building Lineup…
+                </>
+              ) : (
+                <>
+                  <Zap size={22} />
+                  Recommend Starting Lineup
+                </>
+              )}
+            </button>
+            {aiLoading && (
+              <p className="text-center text-xs text-gray-400">
+                Analysing preferred positions and match performance…
+              </p>
+            )}
+          </div>
+
+          {game.status !== 'scheduled' && (
+            <button onClick={() => navigate(`/game/${game.id}`)}
+              className="w-full border border-pitch-300 text-pitch-700 rounded-xl py-3 font-semibold text-sm">
+              Resume Live Game →
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // STEP 2 — Lineup Review & Confirm
+  // ────────────────────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-gray-50 pb-8">
-      <div className="bg-pitch-700 px-4 pt-12 pb-4 text-white">
-        <button onClick={() => navigate('/games')} className="text-pitch-200 text-sm mb-2">← Back</button>
-        <h1 className="text-xl font-bold">vs {game.opponent}</h1>
-        <p className="text-pitch-200 text-sm">{game.date} · {game.homeAway === 'home' ? 'Home' : 'Away'} · {game.formation}</p>
+    <div className="min-h-screen bg-gray-50 pb-10">
+      {/* Header */}
+      <div className="bg-pitch-700 px-4 pt-12 pb-5 text-white">
+        <button onClick={() => setStep(1)} className="text-pitch-200 text-sm mb-3 flex items-center gap-1">
+          <ArrowLeft size={14} /> Adjust Attendance
+        </button>
+        <h1 className="text-2xl font-bold">Starting Lineup</h1>
+        <p className="text-pitch-200 text-sm mt-1">
+          vs {game.opponent} · {game.formation} · {attendance.size} attending
+        </p>
       </div>
 
       <div className="p-4 space-y-4">
-        {/* ── Attendance ── */}
-        <div className="bg-white rounded-xl p-4 shadow-sm">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="font-bold flex items-center gap-2">
-              <Users size={18} className="text-pitch-700" />
-              Attendance ({attendance.size}/{players.length})
-            </h2>
-            <div className="flex gap-3">
-              <button onClick={() => setAttendance(new Set(players.map(p => p.id)))} className="text-xs text-pitch-700 font-medium">All</button>
-              <button onClick={() => setAttendance(new Set())} className="text-xs text-gray-400 font-medium">Clear</button>
-            </div>
+        {/* AI Reasoning */}
+        {aiReasoning && (
+          <div className="bg-amber-50 border border-amber-200 rounded-2xl overflow-hidden">
+            <button
+              onClick={() => setShowReasoning(v => !v)}
+              className="w-full flex items-center gap-2 px-4 py-3 text-left"
+            >
+              <Zap size={15} className="text-amber-600 shrink-0" />
+              <span className="text-sm font-semibold text-amber-800 flex-1">AI Reasoning</span>
+              {showReasoning
+                ? <ChevronUp size={15} className="text-amber-500" />
+                : <ChevronDown size={15} className="text-amber-500" />}
+            </button>
+            {showReasoning && (
+              <div className="px-4 pb-4 text-sm text-amber-900 whitespace-pre-wrap leading-relaxed border-t border-amber-100 pt-3">
+                {aiReasoning}
+              </div>
+            )}
           </div>
-          <div className="grid grid-cols-3 gap-1.5">
-            {sortedAll.map(player => {
-              const present = attendance.has(player.id);
-              return (
-                <button key={player.id} onClick={() => toggleAttendance(player.id)}
-                  className={`flex items-center gap-1.5 p-2 rounded-lg border text-sm transition-colors ${
-                    present ? 'bg-pitch-50 border-pitch-300 text-pitch-800' : 'bg-gray-50 border-gray-200 text-gray-500'
-                  }`}>
-                  <div className={`w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${
-                    present ? 'bg-pitch-700 text-white' : 'bg-gray-200 text-gray-400'
-                  }`}>
-                    {present ? <Check size={10} /> : player.number}
-                  </div>
-                  <span className="truncate text-xs font-medium">{player.name.split(' ')[0]}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
+        )}
 
-        {/* ── Goalkeepers ── */}
-        <div className="bg-white rounded-xl p-4 shadow-sm">
-          <h2 className="font-bold mb-3 flex items-center gap-2">
-            <div className="w-5 h-5 bg-yellow-500 rounded text-xs font-bold text-white flex items-center justify-center">GK</div>
-            Goalkeepers
-          </h2>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs text-gray-500 font-medium block mb-1">1st Half GK</label>
-              <select value={h1Gk} onChange={e => setH1Gk(e.target.value)}
-                className="w-full border border-gray-200 rounded-lg px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pitch-500">
-                <option value="">— Pick GK —</option>
-                {attending.map(p => <option key={p.id} value={p.id}>#{p.number} {p.name}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="text-xs text-gray-500 font-medium block mb-1">2nd Half GK</label>
-              <select value={h2Gk} onChange={e => setH2Gk(e.target.value)}
-                className="w-full border border-gray-200 rounded-lg px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pitch-500">
-                <option value="">— Same GK —</option>
-                {attending.map(p => <option key={p.id} value={p.id}>#{p.number} {p.name}</option>)}
-              </select>
-            </div>
-          </div>
-          {h1Gk && (
-            <p className="text-xs text-gray-400 mt-2">
-              {h2Gk && h2Gk !== h1Gk
-                ? `${players.find(p=>p.id===h1Gk)?.name} plays H1 · ${players.find(p=>p.id===h2Gk)?.name} plays H2`
-                : `${players.find(p=>p.id===h1Gk)?.name} plays both halves`}
-            </p>
-          )}
-        </div>
-
-        {/* ── Lineup Builder ── */}
-        <div className="bg-white rounded-xl p-4 shadow-sm">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="font-bold">Starting Lineup
+        {/* Lineup slots */}
+        <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+            <h2 className="font-bold text-gray-800">
+              Lineup
               <span className="ml-2 text-sm font-normal text-gray-400">{filledCount}/11</span>
             </h2>
-            <button onClick={getAiLineup} disabled={aiLoading || attendance.size < 7 || !h1Gk}
-              className="flex items-center gap-1.5 bg-amber-500 text-white text-sm font-medium px-3 py-1.5 rounded-lg disabled:opacity-50">
-              <Zap size={14} />
-              {aiLoading ? 'Building…' : 'AI Lineup'}
-            </button>
+            <p className="text-xs text-gray-400">Tap a player to swap</p>
           </div>
-
-          {attendance.size < 7 && (
-            <p className="text-sm text-gray-400 mb-3">Mark at least 7 players present first.</p>
-          )}
-          {!h1Gk && attendance.size >= 7 && (
-            <p className="text-sm text-amber-600 mb-3">Select a 1st Half GK to enable AI Lineup.</p>
-          )}
-
-          <div className="space-y-1.5">
+          <div className="p-3 space-y-2">
             {lineupSlots.map((slot, idx) => {
               const player = players.find(p => p.id === slot.playerId);
-              const isGk = slot.position === 'GK';
               const posColor = POSITION_COLORS[slot.position] ?? 'bg-gray-500';
+              const posStats = slot.playerId ? positionStatsMap.get(slot.playerId)?.get(slot.position) : null;
 
               return (
                 <div key={idx} className="flex items-center gap-2">
-                  <div className={`${posColor} text-white text-xs font-bold px-2 py-1 rounded w-12 text-center shrink-0`}>
+                  <div className={`${posColor} text-white text-xs font-bold px-2 py-1.5 rounded-lg w-12 text-center shrink-0`}>
                     {slot.position}
                   </div>
                   <button
-                    onClick={() => isGk ? null : setPickingSlotIdx(idx)}
-                    disabled={isGk}
-                    className={`flex-1 flex items-center gap-2 px-3 py-2 rounded-lg border text-sm text-left transition-colors ${
+                    onClick={() => setPickingSlotIdx(idx)}
+                    className={`flex-1 flex items-center gap-2 px-3 py-2.5 rounded-xl border text-sm text-left transition-colors active:scale-95 ${
                       player
-                        ? 'bg-pitch-50 border-pitch-200 text-pitch-800'
+                        ? 'bg-pitch-50 border-pitch-200 text-pitch-900'
                         : 'bg-gray-50 border-dashed border-gray-300 text-gray-400'
-                    } ${!isGk ? 'active:scale-95' : ''}`}
+                    }`}
                   >
                     {player ? (
                       <>
-                        <span className="font-bold text-xs text-gray-500 w-6">#{player.number}</span>
-                        <span className="font-medium">{player.name}</span>
+                        <span className="font-bold text-gray-500 text-xs w-6 shrink-0">#{player.number}</span>
+                        <span className="font-semibold flex-1">{player.name}</span>
                         {player.positions.includes(slot.position as Position) && (
-                          <span className="ml-auto text-xs text-pitch-600">✓ pref</span>
+                          <span className="text-xs text-pitch-600 shrink-0">✓ pref</span>
+                        )}
+                        {posStats && posStats.minutesPlayed > 0 && (
+                          <span className="text-xs text-gray-400 shrink-0">
+                            {posStats.plusMinus > 0 ? '+' : ''}{posStats.plusMinus}
+                          </span>
                         )}
                       </>
                     ) : (
-                      <span>{isGk ? 'Set GK above' : 'Tap to assign'}</span>
+                      <span>Tap to assign</span>
                     )}
-                    {isGk && <Lock size={12} className="ml-auto text-gray-400" />}
                   </button>
-                  {player && !isGk && (
-                    <button onClick={() => clearSlot(idx)} className="text-gray-300 hover:text-red-400 p-1">✕</button>
+                  {player && (
+                    <button onClick={() => clearSlot(idx)} className="text-gray-300 active:text-red-400 p-1 shrink-0">✕</button>
                   )}
                 </div>
               );
             })}
           </div>
+        </div>
 
-          {/* AI reasoning */}
-          {aiText && (
-            <div className="mt-3">
-              <button onClick={() => setShowAiText(v => !v)}
-                className="flex items-center gap-1 text-xs text-amber-600 font-medium">
-                <ChevronDown size={14} className={showAiText ? 'rotate-180' : ''} />
-                {showAiText ? 'Hide' : 'Show'} AI reasoning
-              </button>
-              {showAiText && (
-                <div className="mt-2 bg-amber-50 rounded-lg p-3 text-xs text-gray-700 whitespace-pre-wrap">
-                  {aiText}
-                </div>
-              )}
+        {/* 2nd Half GK */}
+        <div className="bg-white rounded-2xl shadow-sm px-4 py-4">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 bg-yellow-500 rounded-lg flex items-center justify-center text-xs font-bold text-white shrink-0">GK</div>
+            <div className="flex-1">
+              <label className="text-xs text-gray-500 font-medium block mb-1">2nd Half Goalkeeper</label>
+              <select
+                value={h2Gk}
+                onChange={e => setH2Gk(e.target.value)}
+                className="w-full border border-gray-200 rounded-lg px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pitch-500"
+              >
+                <option value="">— Same as 1st Half —</option>
+                {attending.map(p => (
+                  <option key={p.id} value={p.id}>#{p.number} {p.name}</option>
+                ))}
+              </select>
             </div>
+          </div>
+          {h1GkId && (
+            <p className="text-xs text-gray-400 mt-2 ml-11">
+              {h2Gk && h2Gk !== h1GkId
+                ? `${players.find(p => p.id === h1GkId)?.name} plays H1 · ${players.find(p => p.id === h2Gk)?.name} plays H2`
+                : `${players.find(p => p.id === h1GkId)?.name} plays both halves`}
+            </p>
           )}
         </div>
 
-        {/* ── Preview / Start ── */}
-        <button onClick={() => setShowPreview(true)} disabled={!canStart}
-          className="w-full bg-pitch-700 text-white rounded-xl py-4 font-bold text-lg flex items-center justify-center gap-2 disabled:opacity-50 active:scale-95 transition-transform shadow-lg">
-          <Eye size={22} />
-          Preview Lineup
-        </button>
-        {!canStart && (
-          <p className="text-center text-xs text-gray-400">
-            {attendance.size < 7 ? 'Need at least 7 players' : !h1Gk ? 'Select a 1st Half GK' : `Assign all 11 positions (${filledCount}/11 done)`}
-          </p>
+        {/* Bench */}
+        {benchPlayers.length > 0 && (
+          <div className="bg-white rounded-2xl shadow-sm px-4 py-4">
+            <h3 className="text-sm font-bold text-gray-500 mb-2">BENCH ({benchPlayers.length})</h3>
+            <div className="flex flex-wrap gap-2">
+              {benchPlayers.map(p => (
+                <span key={p.id} className="bg-gray-100 text-gray-600 text-sm px-3 py-1.5 rounded-full font-medium">
+                  #{p.number} {p.name.split(' ')[0]}
+                </span>
+              ))}
+            </div>
+          </div>
         )}
 
-        {game.status !== 'scheduled' && (
-          <button onClick={() => navigate(`/game/${game.id}`)}
-            className="w-full border border-pitch-300 text-pitch-700 rounded-xl py-3 font-semibold text-sm">
-            View Live Game →
+        {/* Start Game */}
+        <div className="space-y-2">
+          {!canStart && (
+            <p className="text-center text-xs text-gray-400">
+              {!h1GkId ? 'Assign a goalkeeper to the GK slot' : `Need at least 7 players in the lineup (${filledCount} filled)`}
+            </p>
+          )}
+          <button
+            onClick={startGame}
+            disabled={!canStart}
+            className="w-full bg-pitch-700 text-white rounded-2xl py-4 font-bold text-lg flex items-center justify-center gap-3 disabled:opacity-40 active:scale-95 transition-transform shadow-lg"
+          >
+            <ArrowRight size={22} />
+            Start Game
           </button>
-        )}
+        </div>
       </div>
-
-      {/* ── Lineup Preview Modal ── */}
-      {showPreview && (
-        <div className="fixed inset-0 bg-black/60 flex items-end z-40" onClick={() => setShowPreview(false)}>
-          <div className="w-full bg-white rounded-t-2xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-            <div className="bg-pitch-700 text-white px-5 pt-5 pb-4 rounded-t-2xl">
-              <p className="text-xs text-pitch-300 mb-1">Starting Lineup</p>
-              <h2 className="text-xl font-bold">vs {game.opponent}</h2>
-              <p className="text-pitch-300 text-sm mt-0.5">{game.formation} · Tap any player to swap</p>
-            </div>
-
-            <div className="p-4 space-y-2">
-              {lineupSlots.map((slot, idx) => {
-                const player = players.find(p => p.id === slot.playerId);
-                const isGk = slot.position === 'GK';
-                const posColor = POSITION_COLORS[slot.position] ?? 'bg-gray-500';
-                const stats = seasonStats.find(s => s.playerId === slot.playerId);
-                return (
-                  <button
-                    key={idx}
-                    onClick={() => !isGk && setPreviewPickingIdx(idx)}
-                    disabled={isGk}
-                    className="w-full flex items-center gap-3 p-3 rounded-xl border border-gray-100 bg-gray-50 active:scale-95 transition-transform text-left"
-                  >
-                    <div className={`${posColor} text-white text-xs font-bold px-2 py-1 rounded w-12 text-center shrink-0`}>
-                      {slot.position}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="font-semibold text-sm text-gray-800">
-                          #{player?.number} {player?.name}
-                        </span>
-                        {player?.positions.includes(slot.position as Position) && (
-                          <span className="text-xs text-pitch-600 font-medium">✓ pref</span>
-                        )}
-                        {isGk && <Lock size={11} className="text-gray-400 ml-auto" />}
-                      </div>
-                      {stats && (
-                        <p className="text-xs text-gray-400 mt-0.5">
-                          {stats.goals}G · {stats.assists}A · +/-{stats.plusMinus > 0 ? '+' : ''}{stats.plusMinus} · {stats.gamesAttended} games
-                        </p>
-                      )}
-                    </div>
-                    {!isGk && <span className="text-gray-300 text-sm shrink-0">⇄</span>}
-                  </button>
-                );
-              })}
-            </div>
-
-            <div className="px-4 pb-8 pt-2 space-y-2">
-              <button
-                onClick={() => { setShowPreview(false); startGame(); }}
-                className="w-full bg-pitch-700 text-white rounded-xl py-4 font-bold text-lg flex items-center justify-center gap-2 active:scale-95 transition-transform shadow-lg"
-              >
-                <ArrowRight size={22} />
-                Confirm & Kick Off
-              </button>
-              <button onClick={() => setShowPreview(false)}
-                className="w-full border border-gray-200 text-gray-600 rounded-xl py-3 text-sm font-medium">
-                ← Back to Setup
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Preview Player Picker ── */}
-      {previewPickingIdx !== null && (
-        <div className="fixed inset-0 bg-black/70 flex items-end z-50" onClick={() => setPreviewPickingIdx(null)}>
-          <div className="w-full bg-white rounded-t-2xl p-5 max-h-[70vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-            <h3 className="font-bold text-gray-900 mb-1">
-              Swap {lineupSlots[previewPickingIdx]?.position}
-            </h3>
-            <p className="text-xs text-gray-500 mb-3">Select a replacement player</p>
-            <div className="grid grid-cols-2 gap-2">
-              {availableForPicker(previewPickingIdx).map(p => {
-                const pos = lineupSlots[previewPickingIdx]?.position;
-                const prefersThis = p.positions.includes(pos as Position);
-                const stats = seasonStats.find(s => s.playerId === p.id);
-                return (
-                  <button key={p.id} onClick={() => { assignPlayer(previewPickingIdx, p.id); setPreviewPickingIdx(null); }}
-                    className={`flex flex-col p-2.5 rounded-xl border text-left active:scale-95 ${
-                      prefersThis ? 'bg-pitch-50 border-pitch-300' : 'bg-gray-50 border-gray-200'
-                    }`}>
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-bold text-sm text-gray-700">#{p.number}</span>
-                      <span className="font-medium text-sm">{p.name.split(' ')[0]}</span>
-                      {prefersThis && <span className="ml-auto text-xs text-pitch-600 font-semibold">✓</span>}
-                    </div>
-                    <div className="text-xs text-gray-400 mt-0.5">
-                      {stats ? `+/- ${stats.plusMinus > 0 ? '+' : ''}${stats.plusMinus} · ${stats.gamesAttended}G` : 'No stats yet'}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* ── Player Picker Modal ── */}
       {pickingSlotIdx !== null && (
         <div className="fixed inset-0 bg-black/60 flex items-end z-50" onClick={() => setPickingSlotIdx(null)}>
-          <div className="w-full bg-white rounded-t-2xl p-5 max-h-[70vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+          <div className="w-full bg-white rounded-t-2xl p-5 max-h-[75vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             <h3 className="font-bold text-gray-900 mb-1">
               Assign {lineupSlots[pickingSlotIdx]?.position}
             </h3>
-            <p className="text-xs text-gray-500 mb-3">Tap a player to assign to this position</p>
+            <p className="text-xs text-gray-400 mb-3">Tap a player to assign · ✓ = preferred position</p>
             <div className="grid grid-cols-2 gap-2">
               {availableForPicker(pickingSlotIdx).map(p => {
                 const pos = lineupSlots[pickingSlotIdx]?.position;
                 const prefersThis = p.positions.includes(pos as Position);
-                const stats = seasonStats.find(s => s.playerId === p.id);
+                const posStats = positionStatsMap.get(p.id)?.get(pos);
+                const totalStats = seasonStats.find(s => s.playerId === p.id);
                 return (
-                  <button key={p.id} onClick={() => assignPlayer(pickingSlotIdx, p.id)}
-                    className={`flex flex-col p-2.5 rounded-xl border text-left transition-colors active:scale-95 ${
+                  <button
+                    key={p.id}
+                    onClick={() => assignPlayer(pickingSlotIdx, p.id)}
+                    className={`flex flex-col p-3 rounded-xl border text-left active:scale-95 transition-transform ${
                       prefersThis ? 'bg-pitch-50 border-pitch-300' : 'bg-gray-50 border-gray-200'
-                    }`}>
+                    }`}
+                  >
                     <div className="flex items-center gap-1.5">
                       <span className="font-bold text-sm text-gray-700">#{p.number}</span>
-                      <span className="font-medium text-sm">{p.name.split(' ')[0]}</span>
-                      {prefersThis && <span className="ml-auto text-xs text-pitch-600 font-semibold">✓</span>}
+                      <span className="font-semibold text-sm flex-1">{p.name.split(' ')[0]}</span>
+                      {prefersThis && <span className="text-xs text-pitch-600 font-bold">✓</span>}
                     </div>
-                    <div className="text-xs text-gray-400 mt-0.5">
-                      {stats ? `+/- ${stats.plusMinus > 0 ? '+' : ''}${stats.plusMinus} · ${stats.gamesAttended}G` : 'No stats yet'}
-                    </div>
+                    {posStats && posStats.minutesPlayed > 0 ? (
+                      <p className="text-xs text-gray-500 mt-1">
+                        {pos}: {posStats.goals}G · {posStats.assists}A · {posStats.plusMinus > 0 ? '+' : ''}{posStats.plusMinus} · {posStats.minutesPlayed}m
+                      </p>
+                    ) : totalStats ? (
+                      <p className="text-xs text-gray-400 mt-1">
+                        Overall: {totalStats.goals}G · {totalStats.assists}A · {totalStats.plusMinus > 0 ? '+' : ''}{totalStats.plusMinus}
+                      </p>
+                    ) : (
+                      <p className="text-xs text-gray-400 mt-1">No stats yet</p>
+                    )}
                   </button>
                 );
               })}
+              {availableForPicker(pickingSlotIdx).length === 0 && (
+                <p className="col-span-2 text-center text-gray-400 text-sm py-4">
+                  All attending players are already in the lineup.
+                </p>
+              )}
             </div>
           </div>
         </div>

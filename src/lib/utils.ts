@@ -215,6 +215,50 @@ export const suggestNextShift = (
   return result;
 };
 
+export interface PositionStat {
+  minutesPlayed: number;
+  goals: number;
+  assists: number;
+  plusMinus: number;
+}
+
+// Per-position performance for every player across completed games.
+// Returns: playerId → position → PositionStat
+export const computePlayerPositionStats = (
+  games: Game[]
+): Map<string, Map<string, PositionStat>> => {
+  const result = new Map<string, Map<string, PositionStat>>();
+
+  for (const game of games) {
+    if (game.status !== 'completed') continue;
+
+    for (const shift of game.shifts) {
+      if (shift.status !== 'completed') continue;
+      const duration = shift.endMinute - shift.startMinute;
+
+      for (const sp of shift.players) {
+        if (!result.has(sp.playerId)) result.set(sp.playerId, new Map());
+        const posMap = result.get(sp.playerId)!;
+        if (!posMap.has(sp.position)) posMap.set(sp.position, { minutesPlayed: 0, goals: 0, assists: 0, plusMinus: 0 });
+        const stat = posMap.get(sp.position)!;
+        stat.minutesPlayed += duration;
+
+        for (const ev of game.events) {
+          if (ev.minute < shift.startMinute || ev.minute >= shift.endMinute) continue;
+          if (ev.isOpponentGoal) {
+            stat.plusMinus--;
+          } else if (ev.type === 'goal') {
+            if (ev.playerId === sp.playerId) { stat.goals++; stat.plusMinus++; }
+            else { stat.plusMinus++; }
+            if (ev.assistPlayerId === sp.playerId) stat.assists++;
+          }
+        }
+      }
+    }
+  }
+  return result;
+};
+
 export const POSITION_LABELS: Partial<Record<string, string>> = {
   GK: 'GK', CB: 'CB', LCB: 'LCB', RCB: 'RCB',
   LB: 'LB', RB: 'RB', LWB: 'LWB', RWB: 'RWB',
