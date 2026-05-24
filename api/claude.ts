@@ -335,9 +335,9 @@ async function handleShiftRecommendation(data: unknown, res: VercelResponse, ant
     opponent: string;
     gameMinute: number;
     currentShiftPlayers: { playerId: string; name: string; number: number; position: string; minutesThisGame: number }[];
-    benchPlayers: { playerId: string; name: string; number: number; minutesThisGame: number; mustPlayNext: boolean }[];
+    benchPlayers: { playerId: string; name: string; number: number; minutesThisGame: number; mustPlayNext: boolean; joinedAtMinute?: number }[];
     allPlayers: {
-      id: string; name: string; number: number; preferredPositions: string[]; minutesThisGame: number;
+      id: string; name: string; number: number; preferredPositions: string[]; minutesThisGame: number; joinedAtMinute?: number;
       positionStats: { position: string; minutesPlayed: number; plusMinus: number; plusMinusPer90: number; goals: number; assists: number }[];
     }[];
     activeGkId: string;
@@ -363,7 +363,10 @@ async function handleShiftRecommendation(data: unknown, res: VercelResponse, ant
 
   const benchLines = benchPlayers.length > 0
     ? benchPlayers.sort((a, b) => a.number - b.number)
-        .map(p => `  BENCH #${p.number} ${p.name} | ${p.minutesThisGame}min${p.mustPlayNext ? ' ★MUST PLAY' : ''}`)
+        .map(p => {
+          const lateNote = p.joinedAtMinute ? ` [joined min ${p.joinedAtMinute}]` : '';
+          return `  BENCH #${p.number} ${p.name} | ${p.minutesThisGame}min${lateNote}${p.mustPlayNext ? ' ★MUST PLAY' : ''}`;
+        })
         .join('\n')
     : '  (none)';
 
@@ -376,7 +379,8 @@ async function handleShiftRecommendation(data: unknown, res: VercelResponse, ant
             `      ${s.position}: +/-${s.plusMinus} | ${s.plusMinusPer90 >= 0 ? '+' : ''}${s.plusMinusPer90.toFixed(2)}/90min | ${s.goals}G ${s.assists}A in ${s.minutesPlayed}min`
           ).join('\n')
         : '      No match history yet';
-      return `  id:${p.id} #${p.number} ${p.name} | ${p.minutesThisGame}min this game | preferred: ${preferred}\n${statsLines}`;
+      const lateNote = p.joinedAtMinute ? ` | joined min ${p.joinedAtMinute} (max ~${90 - p.joinedAtMinute}min available)` : '';
+      return `  id:${p.id} #${p.number} ${p.name} | ${p.minutesThisGame}min this game${lateNote} | preferred: ${preferred}\n${statsLines}`;
     })
     .join('\n\n');
 
@@ -401,7 +405,7 @@ HARD CONSTRAINTS (must be satisfied):
 ${mustPlayBlock}
 
 OPTIMIZATION (apply after constraints, in order):
-1. EQUALIZE TIME: Bring on players with fewer minutes first. Everyone should converge toward equal game time.
+1. EQUALIZE TIME: Bring on players with fewer minutes first. Everyone should converge toward equal game time. For late arrivals (joined mid-game), equalize relative to their available window, not the full 90 minutes.
 2. MAXIMIZE +/-: Among players with similar game time, favour those with higher +/-/90min in the slot they'll fill.
 3. PREFERRED POSITIONS: Place players in preferred positions when possible.
 
