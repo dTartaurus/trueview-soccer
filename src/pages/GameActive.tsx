@@ -31,6 +31,8 @@ export const GameActive = () => {
 
   // Swap map: benchPlayerId → onFieldPlayerId they replace (empty string = no change)
   const [swapMap, setSwapMap] = useState<Record<string, string>>({});
+  // AI recommendations (read-only column, separate from user selections)
+  const [aiSwapMap, setAiSwapMap] = useState<Record<string, string>>({});
   const [swapsConfirmed, setSwapsConfirmed] = useState(false);
   const [aiLoadingShift, setAiLoadingShift] = useState(false);
   const [aiShiftReasoning, setAiShiftReasoning] = useState('');
@@ -319,7 +321,7 @@ export const GameActive = () => {
           if (match) newSwapMap[incoming.playerId] = match.playerId;
         }
 
-        setSwapMap(newSwapMap);
+        setAiSwapMap(newSwapMap);
         setSwapsConfirmed(false);
         setAiShiftReasoning(
           Object.keys(newSwapMap).length === 0
@@ -472,9 +474,13 @@ export const GameActive = () => {
               {/* Bench list with swap dropdowns */}
               {swapBench.length > 0 ? (
                 <div className="space-y-2">
-                  <p className="text-xs text-gray-500 uppercase tracking-wide font-medium">
-                    Bench — select who each player replaces
-                  </p>
+                  {/* Column headers */}
+                  <div className="flex items-center gap-2 px-1">
+                    <div className="w-2 shrink-0" />
+                    <div className="flex-1 text-xs text-gray-500 uppercase tracking-wide font-medium">Bench</div>
+                    <div className="w-[90px] shrink-0 text-xs text-amber-400 uppercase tracking-wide font-medium text-center">AI Rec</div>
+                    <div className="w-[130px] shrink-0 text-xs text-gray-500 uppercase tracking-wide font-medium text-center">Replace</div>
+                  </div>
                   {swapBench.map(benchP => {
                     const mins = minutesMap.get(benchP.id) ?? 0;
                     const mustPlay = prevBenchedIds.has(benchP.id);
@@ -501,6 +507,11 @@ export const GameActive = () => {
                       setSwapMap(prev => ({ ...prev, [benchP.id]: '' }));
                     }
 
+                    // AI recommendation for this bench player
+                    const aiRecId = aiSwapMap[benchP.id] ?? '';
+                    const aiRecPlayer = aiRecId ? swapOnField.find(p => p.id === aiRecId) : null;
+                    const aiRecSlot = aiRecId ? referenceShift?.players.find(sp => sp.playerId === aiRecId) : null;
+
                     return (
                       <div key={benchP.id}
                         className={`rounded-xl px-3 py-2.5 flex items-center gap-2 ${mustPlay ? 'bg-amber-900/25 border border-amber-700/30' : 'bg-gray-700/40'}`}>
@@ -513,6 +524,17 @@ export const GameActive = () => {
                           <span className="text-xs text-gray-500 ml-1.5">{mins}m</span>
                           {mustPlay && <span className="text-xs text-amber-400 ml-1.5">↑ must play</span>}
                         </div>
+                        {/* AI recommendation column */}
+                        <div className="w-[90px] shrink-0 text-center">
+                          {aiRecPlayer ? (
+                            <span className="inline-flex flex-col items-center leading-tight">
+                              <span className="text-xs font-medium text-amber-300">{aiRecPlayer.name.split(' ')[0]}</span>
+                              <span className="text-[10px] text-amber-500">({aiRecSlot?.position ?? '?'}) {roundTo15(minutesMap.get(aiRecPlayer.id) ?? 0)}m</span>
+                            </span>
+                          ) : (
+                            <span className="text-[10px] text-gray-600">—</span>
+                          )}
+                        </div>
                         {/* Replaces dropdown */}
                         <select
                           value={selectedOutId}
@@ -520,19 +542,9 @@ export const GameActive = () => {
                             setSwapMap(prev => ({ ...prev, [benchP.id]: e.target.value }));
                             setSwapsConfirmed(false);
                           }}
-                          className="bg-gray-800 text-white text-xs rounded-lg px-2 py-1.5 border border-gray-600 shrink-0 max-w-[150px]"
+                          className="bg-gray-800 text-white text-xs rounded-lg px-2 py-1.5 border border-gray-600 shrink-0 w-[130px]"
                         >
                           <option value="">— stays bench —</option>
-                          {/* If AI pre-selected a player who's now "claimed" by another, show them anyway so their slot isn't lost */}
-                          {isStoredValid && claimedByOthers.has(storedOut) && (() => {
-                            const p = swapOnField.find(op => op.id === storedOut);
-                            const slot = referenceShift?.players.find(sp => sp.playerId === storedOut);
-                            return p ? (
-                              <option key={p.id} value={p.id}>
-                                #{p.number} {p.name.split(' ')[0]} ({slot?.position ?? '?'}) {roundTo15(minutesMap.get(p.id) ?? 0)}m
-                              </option>
-                            ) : null;
-                          })()}
                           {availableOnField.map(onP => {
                             const onSlot = referenceShift?.players.find(sp => sp.playerId === onP.id);
                             return (
@@ -588,7 +600,7 @@ export const GameActive = () => {
               {/* Clear all swaps */}
               {hasAnySwap && (
                 <button
-                  onClick={() => { setSwapMap({}); setSwapsConfirmed(false); }}
+                  onClick={() => { setSwapMap({}); setAiSwapMap({}); setAiShiftReasoning(''); setSwapsConfirmed(false); }}
                   className="w-full border border-gray-600 rounded-xl py-2 text-xs text-gray-400 active:scale-95 transition-transform"
                 >
                   Clear All Changes
