@@ -369,9 +369,19 @@ export const GameActive = () => {
   const isLiveGame = ['first-half', 'second-half'].includes(game.status);
   const maxMin = attendingPlayers.length > 0 ? Math.max(1, ...attendingPlayers.map(p => minutesMap.get(p.id) ?? 0)) : 1;
   const hasAnySwap = Object.values(swapMap).some(Boolean);
-  // Auto-default: 15 minutes from now (or shift 4 start during half-time)
-  const autoNextSub = game.status === 'half-time' ? 60 : timer.gameMinute + 15;
+  // Auto-default: 15 minutes from the last sub (start of current active shift)
+  // During half-time the "last sub" is end of H1 (45), so default = 60.
+  const lastSubMinute = activeShift?.startMinute ?? (game.status === 'half-time' ? 45 : 0);
+  const autoNextSub = lastSubMinute + 15;
   const projectedNextSub = nextSubMinuteOverride ?? autoNextSub;
+  // Minutes from now until next sub — added to on-field players' actual minutes
+  // when shown in the substitution UI (AI Rec column, Replace dropdown).
+  // Never affects stats or the Playing Time bar.
+  const minutesUntilNextSub = Math.max(0, projectedNextSub - timer.gameMinute);
+  const projectedMinutes = (playerId: string): number => {
+    const actual = minutesMap.get(playerId) ?? 0;
+    return refOnFieldIds.has(playerId) ? actual + minutesUntilNextSub : actual;
+  };
 
   return (
     <div className="flex flex-col h-screen bg-gray-900 text-white overflow-hidden">
@@ -532,7 +542,7 @@ export const GameActive = () => {
                           {aiRecPlayer ? (
                             <span className="inline-flex flex-col items-center leading-tight">
                               <span className="text-xs font-medium text-amber-300">{aiRecPlayer.name.split(' ')[0]}</span>
-                              <span className="text-[10px] text-amber-500">({aiRecSlot?.position ?? '?'}) {minutesMap.get(aiRecPlayer.id) ?? 0}m</span>
+                              <span className="text-[10px] text-amber-500">({aiRecSlot?.position ?? '?'}) {projectedMinutes(aiRecPlayer.id)}m</span>
                             </span>
                           ) : (
                             <span className="text-[10px] text-gray-600">—</span>
@@ -552,7 +562,7 @@ export const GameActive = () => {
                             const onSlot = referenceShift?.players.find(sp => sp.playerId === onP.id);
                             return (
                               <option key={onP.id} value={onP.id}>
-                                #{onP.number} {onP.name.split(' ')[0]} ({onSlot?.position ?? '?'}) {minutesMap.get(onP.id) ?? 0}m
+                                #{onP.number} {onP.name.split(' ')[0]} ({onSlot?.position ?? '?'}) {projectedMinutes(onP.id)}m
                               </option>
                             );
                           })}
@@ -565,22 +575,30 @@ export const GameActive = () => {
                 <p className="text-xs text-gray-500 text-center py-1">All players are on the field</p>
               )}
 
-              {/* Next sub time input */}
+              {/* Next sub time stepper */}
               <div className="flex items-center gap-2 bg-gray-700/40 rounded-xl px-3 py-2">
                 <label className="text-xs text-gray-300 font-medium flex-1">
                   Next sub at minute
                 </label>
-                <input
-                  type="number"
-                  min={timer.gameMinute}
-                  max={90}
-                  value={projectedNextSub}
-                  onChange={e => {
-                    const v = parseInt(e.target.value);
-                    setNextSubMinuteOverride(Number.isFinite(v) ? v : null);
-                  }}
-                  className="w-16 bg-gray-800 text-white text-sm text-center rounded-lg px-2 py-1 border border-gray-600"
-                />
+                <button
+                  onClick={() => setNextSubMinuteOverride(Math.max(timer.gameMinute, projectedNextSub - 1))}
+                  disabled={projectedNextSub <= timer.gameMinute}
+                  className="w-8 h-8 rounded-lg bg-gray-800 border border-gray-600 text-white text-base font-bold flex items-center justify-center active:bg-gray-700 disabled:opacity-40"
+                  aria-label="Decrease next sub minute"
+                >
+                  <Minus size={14} />
+                </button>
+                <span className="w-10 text-center text-sm font-bold text-white tabular-nums">
+                  {projectedNextSub}
+                </span>
+                <button
+                  onClick={() => setNextSubMinuteOverride(Math.min(90, projectedNextSub + 1))}
+                  disabled={projectedNextSub >= 90}
+                  className="w-8 h-8 rounded-lg bg-gray-800 border border-gray-600 text-white text-base font-bold flex items-center justify-center active:bg-gray-700 disabled:opacity-40"
+                  aria-label="Increase next sub minute"
+                >
+                  <Plus size={14} />
+                </button>
                 {nextSubMinuteOverride !== null && (
                   <button
                     onClick={() => setNextSubMinuteOverride(null)}
