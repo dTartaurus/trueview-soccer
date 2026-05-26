@@ -326,14 +326,15 @@ Use the set_lineup tool to return exactly ${slotsToFill} player-position assignm
 
 async function handleShiftRecommendation(data: unknown, res: VercelResponse, anthropic: Anthropic) {
   const {
-    nextShiftNumber, formation, teamName, opponent, gameMinute,
-    currentShiftPlayers, benchPlayers, allPlayers, activeGkId, isSecondHalf, slotsCount,
+    nextShiftNumber, formation, teamName, opponent, gameMinute, nextSubMinute,
+    currentShiftPlayers, benchPlayers, allPlayers, activeGkId, isSecondHalf,
   } = data as {
     nextShiftNumber: number;
     formation: string;
     teamName: string;
     opponent: string;
     gameMinute: number;
+    nextSubMinute: number;
     currentShiftPlayers: { playerId: string; name: string; number: number; position: string; minutesThisGame: number }[];
     benchPlayers: { playerId: string; name: string; number: number; minutesThisGame: number; mustPlayNext: boolean; joinedAtMinute?: number }[];
     allPlayers: {
@@ -343,7 +344,6 @@ async function handleShiftRecommendation(data: unknown, res: VercelResponse, ant
     }[];
     activeGkId: string;
     isSecondHalf: boolean;
-    slotsCount: number;
   };
 
   const positionMap: Record<string, string> = {
@@ -399,13 +399,13 @@ async function handleShiftRecommendation(data: unknown, res: VercelResponse, ant
 
   const prompt = `You are coaching "${teamName}" vs ${opponent}. It is minute ${gameMinute} (${isSecondHalf ? '2nd' : '1st'} half), ${formation} formation.
 
-Decide which substitutions to make at the Shift ${nextShiftNumber} break (minute ${(nextShiftNumber - 1) * 15}).
+Decide which substitutions to make at minute ${nextSubMinute} (Shift ${nextShiftNumber} starts).
 GK is locked: id:${activeGkId} (${activeGk?.name ?? ''}) — never substitute.
 
-CURRENTLY ON FIELD (position | projected minutes at sub):
+CURRENTLY ON FIELD (position | projected minutes by the time of the sub at minute ${nextSubMinute}):
 ${currentLines}
 
-BENCH (projected minutes at sub):
+BENCH (actual minutes played so far — they don't change between now and the sub):
 ${benchLines}
 
 HARD CONSTRAINTS:
@@ -413,7 +413,7 @@ HARD CONSTRAINTS:
 ${mustPlayBlock}
 
 OPTIMIZATION — apply in this exact order:
-1. EQUALIZE TIME: Prioritise bringing on the bench players with the fewest projected minutes. Each bench player who comes on takes the position of the on-field player who comes off.
+1. EQUALIZE TIME: At the sub (minute ${nextSubMinute}), each on-field player will have the projected minutes shown; each bench player will still have their current minutes. Prioritise bringing on the bench players with the fewest minutes. Each bench player who comes on takes the position of the on-field player who comes off.
 2. PLUS/MINUS: Among players with similar minutes, prefer the bench player with the better +/- in the target position. Weight THIS GAME +/- most heavily; use HISTORICAL /90 as tiebreaker.
 3. PREFERRED POSITIONS: When multiple on-field players could come off, prefer the swap that puts the bench player into one of their preferred positions.
 

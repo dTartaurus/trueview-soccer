@@ -15,8 +15,6 @@ const POSITION_COLORS: Record<string, string> = {
   LW: 'bg-pitch-600', RW: 'bg-pitch-600', ST: 'bg-red-700', CF: 'bg-red-600', SS: 'bg-red-600',
 };
 
-const roundTo15 = (mins: number) => Math.round(mins / 15) * 15;
-
 export const GameActive = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -37,6 +35,8 @@ export const GameActive = () => {
   const [aiLoadingShift, setAiLoadingShift] = useState(false);
   const [aiShiftReasoning, setAiShiftReasoning] = useState('');
   const [showAiReasoning, setShowAiReasoning] = useState(false);
+  // Coach-set time of next expected substitution. null = auto-default (gameMinute + 15)
+  const [nextSubMinuteOverride, setNextSubMinuteOverride] = useState<number | null>(null);
 
   // Sub execute modal
   const [showSubModal, setShowSubModal] = useState(false);
@@ -230,17 +230,16 @@ export const GameActive = () => {
     setAiLoadingShift(true);
     setAiShiftReasoning('');
     try {
-      const partialCurrentShift = activeShift
-        ? Math.max(0, timer.gameMinute - activeShift.startMinute)
-        : 0;
+      const nextSubMin = projectedNextSub;
+      const minutesUntilSub = Math.max(0, nextSubMin - timer.gameMinute);
 
       const currentShiftPlayers = referenceShift.players.map(sp => {
         const p = players.find(pl => pl.id === sp.playerId);
-        const completedMins = (minutesMap.get(sp.playerId) ?? 0) - partialCurrentShift;
+        const rawMins = minutesMap.get(sp.playerId) ?? 0;
         return {
           playerId: sp.playerId, name: p?.name ?? '', number: p?.number ?? 0,
           position: sp.position,
-          minutesThisGame: roundTo15(Math.max(0, completedMins) + 15),
+          minutesThisGame: rawMins + minutesUntilSub,
         };
       });
 
@@ -254,9 +253,7 @@ export const GameActive = () => {
       const allPlayersData = attendingPlayers.map(p => {
         const isOnField = refOnFieldIds.has(p.id);
         const rawMins = minutesMap.get(p.id) ?? 0;
-        const adjustedMins = isOnField
-          ? Math.max(0, rawMins - partialCurrentShift) + 15
-          : rawMins;
+        const adjustedMins = isOnField ? rawMins + minutesUntilSub : rawMins;
         const posStats = positionStatsMap.get(p.id);
         const currentPosPm = currentGamePosPlusMinus.get(p.id);
         return {
@@ -289,6 +286,7 @@ export const GameActive = () => {
             teamName: settings?.teamName ?? 'Our Team',
             opponent: game.opponent,
             gameMinute: timer.gameMinute,
+            nextSubMinute: nextSubMin,
             currentShiftPlayers,
             benchPlayers: benchList,
             allPlayers: allPlayersData,
@@ -371,6 +369,9 @@ export const GameActive = () => {
   const isLiveGame = ['first-half', 'second-half'].includes(game.status);
   const maxMin = attendingPlayers.length > 0 ? Math.max(1, ...attendingPlayers.map(p => minutesMap.get(p.id) ?? 0)) : 1;
   const hasAnySwap = Object.values(swapMap).some(Boolean);
+  // Auto-default: 15 minutes from now (or shift 4 start during half-time)
+  const autoNextSub = game.status === 'half-time' ? 60 : timer.gameMinute + 15;
+  const projectedNextSub = nextSubMinuteOverride ?? autoNextSub;
 
   return (
     <div className="flex flex-col h-screen bg-gray-900 text-white overflow-hidden">
@@ -430,7 +431,7 @@ export const GameActive = () => {
           <div className="bg-gray-800 rounded-xl overflow-hidden">
             <div className="px-3 py-2 border-b border-gray-700">
               <p className="text-xs font-semibold text-gray-300 uppercase tracking-wide">
-                On Field · Shift {activeShift.shiftNumber} · {(activeShift.shiftNumber - 1) * 15}–{activeShift.shiftNumber * 15} min
+                On Field · Shift {activeShift.shiftNumber}
               </p>
             </div>
             <div className="px-3 py-2 space-y-1.5">
@@ -463,8 +464,8 @@ export const GameActive = () => {
             <div className="px-3 py-2.5 border-b border-gray-700 flex items-center justify-between">
               <p className="text-xs font-semibold text-gray-300 uppercase tracking-wide">
                 {game.status === 'half-time'
-                  ? 'Shift 4 · 45–60 min (2nd Half)'
-                  : `Next · Shift ${nextShiftNum} · ${(nextShiftNum - 1) * 15}–${nextShiftNum * 15} min`}
+                  ? 'Shift 4 (2nd Half)'
+                  : `Next · Shift ${nextShiftNum}`}
               </p>
               {swapsConfirmed && (
                 <span className="text-xs text-pitch-400 flex items-center gap-1"><Check size={11} /> Confirmed</span>
@@ -563,6 +564,32 @@ export const GameActive = () => {
               ) : (
                 <p className="text-xs text-gray-500 text-center py-1">All players are on the field</p>
               )}
+
+              {/* Next sub time input */}
+              <div className="flex items-center gap-2 bg-gray-700/40 rounded-xl px-3 py-2">
+                <label className="text-xs text-gray-300 font-medium flex-1">
+                  Next sub at minute
+                </label>
+                <input
+                  type="number"
+                  min={timer.gameMinute}
+                  max={90}
+                  value={projectedNextSub}
+                  onChange={e => {
+                    const v = parseInt(e.target.value);
+                    setNextSubMinuteOverride(Number.isFinite(v) ? v : null);
+                  }}
+                  className="w-16 bg-gray-800 text-white text-sm text-center rounded-lg px-2 py-1 border border-gray-600"
+                />
+                {nextSubMinuteOverride !== null && (
+                  <button
+                    onClick={() => setNextSubMinuteOverride(null)}
+                    className="text-[10px] text-gray-500 underline"
+                  >
+                    auto
+                  </button>
+                )}
+              </div>
 
               {/* AI Recommended Changes button */}
               <button
@@ -756,7 +783,7 @@ export const GameActive = () => {
           <div className="w-full bg-gray-800 rounded-t-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
             <div className="bg-gray-700 px-5 py-4">
               <h3 className="text-lg font-bold">Shift {activeShift.shiftNumber} → Shift {nextShiftNum}</h3>
-              <p className="text-xs text-gray-400 mt-0.5">{(nextShiftNum - 1) * 15}–{nextShiftNum * 15} min</p>
+              <p className="text-xs text-gray-400 mt-0.5">at minute {timer.gameMinute}</p>
             </div>
             <div className="px-5 py-4 space-y-3 max-h-[50vh] overflow-y-auto">
               {comingOff.length > 0 ? (
