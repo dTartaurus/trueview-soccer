@@ -359,17 +359,17 @@ async function handleShiftRecommendation(data: unknown, res: VercelResponse, ant
 
   const currentLines = currentShiftPlayers
     .sort((a, b) => a.number - b.number)
-    .map(p => `  ON   #${p.number} ${p.name} | ${p.position} | ${p.minutesThisGame}min`)
+    .map(p => `  ON-FIELD  onFieldPlayerId:"${p.playerId}"  #${p.number} ${p.name}  position:${p.position}  ${p.minutesThisGame}min`)
     .join('\n');
 
   const benchLines = benchPlayers.length > 0
     ? benchPlayers.sort((a, b) => a.number - b.number)
         .map(p => {
           const lateNote = p.joinedAtMinute ? ` [joined min ${p.joinedAtMinute}]` : '';
-          return `  BENCH #${p.number} ${p.name} | ${p.minutesThisGame}min${lateNote}${p.mustPlayNext ? ' ★MUST PLAY' : ''}`;
+          return `  BENCH     benchPlayerId:"${p.playerId}"  #${p.number} ${p.name}  ${p.minutesThisGame}min${lateNote}${p.mustPlayNext ? '  ★MUST PLAY' : ''}`;
         })
         .join('\n')
-    : '  (none)';
+    : '  (none — no bench players available)';
 
   const allPlayerLines = allPlayers
     .sort((a, b) => a.number - b.number)
@@ -420,8 +420,13 @@ OPTIMIZATION — apply in this exact order:
 PLAYER DATA (all attendees):
 ${allPlayerLines}
 
-Use set_substitutions to list every swap you recommend. Return an empty array if no changes are needed.
-For each swap: benchPlayerId = the bench player coming ON, onFieldPlayerId = the on-field player going OFF, position = the slot being exchanged (must be a valid ${formation} position).`;
+Use set_substitutions to list every swap you recommend.
+CRITICAL: copy the EXACT id strings shown above:
+  - benchPlayerId MUST be one of the benchPlayerId values from the BENCH section
+  - onFieldPlayerId MUST be one of the onFieldPlayerId values from the ON-FIELD section (never the GK's id)
+  - position MUST be a valid ${formation} formation slot
+
+Empty array is only acceptable if there are zero bench players or every bench player already has more minutes than every on-field non-GK player.`;
 
   const message = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',

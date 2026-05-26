@@ -296,19 +296,28 @@ export const GameActive = () => {
       });
 
       const json = await res.json();
+      console.log('[AI shift rec] response:', json);
       if (json.error) {
         alert(`AI error: ${json.error}`);
       } else if (Array.isArray(json.substitutions)) {
-        // API now returns direct substitution pairs — no diffing needed
+        // API returns direct substitution pairs — no diffing needed
         const validOutIds = new Set(swapOnField.filter(p => p.id !== activeGkId).map(p => p.id));
         const validInIds = new Set(swapBench.map(p => p.id));
+        console.log('[AI shift rec] validInIds:', [...validInIds], 'validOutIds:', [...validOutIds]);
 
         const newSwapMap: Record<string, string> = {};
+        const rejected: { sub: { benchPlayerId: string; onFieldPlayerId: string }; reason: string }[] = [];
         for (const sub of json.substitutions as { benchPlayerId: string; onFieldPlayerId: string }[]) {
-          if (validInIds.has(sub.benchPlayerId) && validOutIds.has(sub.onFieldPlayerId)) {
+          const inOk = validInIds.has(sub.benchPlayerId);
+          const outOk = validOutIds.has(sub.onFieldPlayerId);
+          if (inOk && outOk) {
             newSwapMap[sub.benchPlayerId] = sub.onFieldPlayerId;
+          } else {
+            rejected.push({ sub, reason: !inOk ? 'bench id invalid' : 'on-field id invalid' });
           }
         }
+        if (rejected.length > 0) console.warn('[AI shift rec] rejected subs:', rejected);
+        console.log('[AI shift rec] newSwapMap:', newSwapMap);
 
         setAiSwapMap(newSwapMap);
         setSwapsConfirmed(false);
