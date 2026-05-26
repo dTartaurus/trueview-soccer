@@ -303,18 +303,29 @@ export const GameActive = () => {
         const aiComingOn = (json.startingLineup as { playerId: string; position: string }[])
           .filter(a => !refOnFieldIds.has(a.playerId));
 
+        // Valid sets for validation — outgoing must be a non-GK on-field player
+        const validOutIds = new Set(swapOnField.filter(p => p.id !== activeGkId).map(p => p.id));
+        const validInIds = new Set(swapBench.map(p => p.id));
+
         const newSwapMap: Record<string, string> = {};
         for (const incoming of aiComingOn) {
-          const byPos = aiComingOff.findIndex(off => off.position === incoming.position);
-          if (byPos !== -1) {
-            newSwapMap[incoming.playerId] = aiComingOff.splice(byPos, 1)[0].playerId;
-          } else if (aiComingOff.length > 0) {
-            newSwapMap[incoming.playerId] = aiComingOff.splice(0, 1)[0].playerId;
-          }
+          if (!validInIds.has(incoming.playerId)) continue; // skip if not actually on bench
+          const byPos = aiComingOff.findIndex(off => off.position === incoming.position && validOutIds.has(off.playerId));
+          const match = byPos !== -1
+            ? aiComingOff.splice(byPos, 1)[0]
+            : aiComingOff.find(off => validOutIds.has(off.playerId))
+              ? aiComingOff.splice(aiComingOff.findIndex(off => validOutIds.has(off.playerId)), 1)[0]
+              : null;
+          if (match) newSwapMap[incoming.playerId] = match.playerId;
         }
+
         setSwapMap(newSwapMap);
         setSwapsConfirmed(false);
-        setAiShiftReasoning(json.reasoning ?? '');
+        setAiShiftReasoning(
+          Object.keys(newSwapMap).length === 0
+            ? `${json.reasoning ?? ''}\n\nAI recommends no substitutions this shift — current lineup is already optimally balanced.`
+            : (json.reasoning ?? '')
+        );
         setShowAiReasoning(true);
       } else {
         alert(json.error ?? 'Could not generate recommendation. Try again.');
@@ -467,13 +478,29 @@ export const GameActive = () => {
                   {swapBench.map(benchP => {
                     const mins = minutesMap.get(benchP.id) ?? 0;
                     const mustPlay = prevBenchedIds.has(benchP.id);
-                    const selectedOutId = swapMap[benchP.id] ?? '';
-                    // On-field players already claimed by a different bench player
+
+                    // On-field players claimed by OTHER bench players (not this one)
                     const claimedByOthers = new Set(
                       Object.entries(swapMap)
                         .filter(([inId, outId]) => inId !== benchP.id && !!outId)
                         .map(([, outId]) => outId)
                     );
+
+                    // Available on-field players: exclude GK and those claimed by others
+                    const availableOnField = swapOnField
+                      .filter(onP => onP.id !== activeGkId && !claimedByOthers.has(onP.id))
+                      .sort((a, b) => (minutesMap.get(b.id) ?? 0) - (minutesMap.get(a.id) ?? 0));
+
+                    // Validate stored selection — if it's been claimed by another, clear it
+                    const storedOut = swapMap[benchP.id] ?? '';
+                    const isStoredValid = !!storedOut && swapOnField.some(p => p.id === storedOut && p.id !== activeGkId);
+                    const selectedOutId = isStoredValid ? storedOut : '';
+
+                    // If stored selection differs from validated (someone else claimed it), clear it
+                    if (storedOut && !isStoredValid && storedOut !== '') {
+                      setSwapMap(prev => ({ ...prev, [benchP.id]: '' }));
+                    }
+
                     return (
                       <div key={benchP.id}
                         className={`rounded-xl px-3 py-2.5 flex items-center gap-2 ${mustPlay ? 'bg-amber-900/25 border border-amber-700/30' : 'bg-gray-700/40'}`}>
@@ -496,18 +523,24 @@ export const GameActive = () => {
                           className="bg-gray-800 text-white text-xs rounded-lg px-2 py-1.5 border border-gray-600 shrink-0 max-w-[150px]"
                         >
                           <option value="">— stays bench —</option>
-                          {swapOnField
-                            .filter(onP => onP.id !== activeGkId) // GK cannot come off
-                            .sort((a, b) => (minutesMap.get(b.id) ?? 0) - (minutesMap.get(a.id) ?? 0))
-                            .map(onP => {
-                              const onSlot = referenceShift?.players.find(sp => sp.playerId === onP.id);
-                              const claimed = claimedByOthers.has(onP.id);
-                              return (
-                                <option key={onP.id} value={onP.id} disabled={claimed}>
-                                  #{onP.number} {onP.name.split(' ')[0]} ({onSlot?.position ?? '?'}) {roundTo15(minutesMap.get(onP.id) ?? 0)}m{claimed ? ' ✗' : ''}
-                                </option>
-                              );
-                            })}
+                          {/* If AI pre-selected a player who's now "claimed" by another, show them anyway so their slot isn't lost */}
+                          {isStoredValid && claimedByOthers.has(storedOut) && (() => {
+                            const p = swapOnField.find(op => op.id === storedOut);
+                            const slot = referenceShift?.players.find(sp => sp.playerId === storedOut);
+                            return p ? (
+                              <option key={p.id} value={p.id}>
+                                #{p.number} {p.name.split(' ')[0]} ({slot?.position ?? '?'}) {roundTo15(minutesMap.get(p.id) ?? 0)}m
+                              </option>
+                            ) : null;
+                          })()}
+                          {availableOnField.map(onP => {
+                            const onSlot = referenceShift?.players.find(sp => sp.playerId === onP.id);
+                            return (
+                              <option key={onP.id} value={onP.id}>
+                                #{onP.number} {onP.name.split(' ')[0]} ({onSlot?.position ?? '?'}) {roundTo15(minutesMap.get(onP.id) ?? 0)}m
+                              </option>
+                            );
+                          })}
                         </select>
                       </div>
                     );
