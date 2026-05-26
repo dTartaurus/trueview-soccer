@@ -172,9 +172,10 @@ export const GameActive = () => {
     await updateGame(game.id, { timerStartedAt: Date.now() });
   };
   const triggerHalfTime = async () => {
+    const endMin = timer.gameMinute;
     await pauseTimer();
     const shifts = game.shifts.map(s =>
-      s.id === activeShift?.id ? { ...s, status: 'completed' as const } : s
+      s.id === activeShift?.id ? { ...s, status: 'completed' as const, endMinute: endMin } : s
     );
     await updateGame(game.id, { status: 'half-time', timerStartedAt: null, timerElapsed: 45 * 60, shifts });
     setSwapMap({});
@@ -182,8 +183,9 @@ export const GameActive = () => {
   };
   const startSecondHalf = async () => {
     if (!nextShiftLineup) return;
+    const startMin = 45;
     const shifts = game.shifts.map(s =>
-      s.shiftNumber === 4 ? { ...s, status: 'active' as const, players: nextShiftLineup } : s
+      s.shiftNumber === 4 ? { ...s, status: 'active' as const, players: nextShiftLineup, startMinute: startMin } : s
     );
     await updateGame(game.id, { status: 'second-half', currentHalf: 2, timerStartedAt: Date.now(), timerElapsed: 45 * 60, shifts });
     setSwapMap({});
@@ -192,9 +194,10 @@ export const GameActive = () => {
   };
   const endGame = async () => {
     if (!confirm('End game and mark as completed?')) return;
+    const endMin = timer.gameMinute;
     await pauseTimer();
     const shifts = game.shifts.map(s =>
-      s.id === activeShift?.id ? { ...s, status: 'completed' as const } : s
+      s.id === activeShift?.id ? { ...s, status: 'completed' as const, endMinute: endMin } : s
     );
     await updateGame(game.id, { status: 'completed', shifts });
     navigate('/games');
@@ -342,9 +345,10 @@ export const GameActive = () => {
     if (!nextShiftLineup || !activeShift) return;
     const nextShift = game.shifts.find(s => s.shiftNumber === nextShiftNum);
     if (!nextShift) return;
+    const subMin = timer.gameMinute;
     const shifts = game.shifts.map(s => {
-      if (s.id === activeShift.id) return { ...s, status: 'completed' as const };
-      if (s.id === nextShift.id) return { ...s, status: 'active' as const, players: nextShiftLineup };
+      if (s.id === activeShift.id) return { ...s, status: 'completed' as const, endMinute: subMin };
+      if (s.id === nextShift.id) return { ...s, status: 'active' as const, players: nextShiftLineup, startMinute: subMin };
       return s;
     });
     await updateGame(game.id, { shifts });
