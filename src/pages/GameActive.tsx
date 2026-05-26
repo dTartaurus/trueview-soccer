@@ -82,6 +82,27 @@ export const GameActive = () => {
     [completedGames.length]
   );
 
+  // Plus/minus per player per position accumulated in THIS game so far
+  const currentGamePosPlusMinus = useMemo(() => {
+    const result = new Map<string, Map<string, number>>();
+    for (const shift of game.shifts) {
+      if (shift.status !== 'completed' && shift.status !== 'active') continue;
+      const shiftEnd = shift.status === 'active' ? timer.gameMinute + 1 : shift.endMinute;
+      for (const sp of shift.players) {
+        if (!result.has(sp.playerId)) result.set(sp.playerId, new Map());
+        const posMap = result.get(sp.playerId)!;
+        if (!posMap.has(sp.position)) posMap.set(sp.position, 0);
+        for (const ev of game.events) {
+          if (ev.minute < shift.startMinute || ev.minute >= shiftEnd) continue;
+          const cur = posMap.get(sp.position)!;
+          if (ev.isOpponentGoal) posMap.set(sp.position, cur - 1);
+          else if (ev.type === 'goal') posMap.set(sp.position, cur + 1);
+        }
+      }
+    }
+    return result;
+  }, [game.shifts, game.events, timer.gameMinute]);
+
   // Diff between current and next shift
   const nextOnFieldIds = new Set((nextShiftLineup ?? []).map(p => p.playerId));
   const comingOff = activeShift?.players.filter(p => !nextOnFieldIds.has(p.playerId)) ?? [];
@@ -205,11 +226,15 @@ export const GameActive = () => {
           ? roundTo15(Math.max(0, rawMins - partialCurrentShift) + 15)
           : roundTo15(rawMins);
         const posStats = positionStatsMap.get(p.id);
+        const currentPosPm = currentGamePosPlusMinus.get(p.id);
         return {
           id: p.id, name: p.name, number: p.number,
           preferredPositions: p.positions,
           minutesThisGame: adjustedMins,
           joinedAtMinute: lateArrivalTimes[p.id] ?? 0,
+          currentGamePositionStats: currentPosPm
+            ? Array.from(currentPosPm.entries()).map(([pos, pm]) => ({ position: pos, plusMinus: pm }))
+            : [],
           positionStats: posStats ? Array.from(posStats.entries()).map(([pos, stat]) => ({
             position: pos,
             minutesPlayed: stat.minutesPlayed,

@@ -338,6 +338,7 @@ async function handleShiftRecommendation(data: unknown, res: VercelResponse, ant
     benchPlayers: { playerId: string; name: string; number: number; minutesThisGame: number; mustPlayNext: boolean; joinedAtMinute?: number }[];
     allPlayers: {
       id: string; name: string; number: number; preferredPositions: string[]; minutesThisGame: number; joinedAtMinute?: number;
+      currentGamePositionStats: { position: string; plusMinus: number }[];
       positionStats: { position: string; minutesPlayed: number; plusMinus: number; plusMinusPer90: number; goals: number; assists: number }[];
     }[];
     activeGkId: string;
@@ -374,13 +375,19 @@ async function handleShiftRecommendation(data: unknown, res: VercelResponse, ant
     .sort((a, b) => a.number - b.number)
     .map(p => {
       const preferred = p.preferredPositions.length > 0 ? p.preferredPositions.join(', ') : 'flexible';
-      const statsLines = p.positionStats.length > 0
-        ? p.positionStats.map(s =>
-            `      ${s.position}: +/-${s.plusMinus} | ${s.plusMinusPer90 >= 0 ? '+' : ''}${s.plusMinusPer90.toFixed(2)}/90min | ${s.goals}G ${s.assists}A in ${s.minutesPlayed}min`
-          ).join('\n')
-        : '      No match history yet';
       const lateNote = p.joinedAtMinute ? ` | joined min ${p.joinedAtMinute} (max ~${90 - p.joinedAtMinute}min available)` : '';
-      return `  id:${p.id} #${p.number} ${p.name} | ${p.minutesThisGame}min this game${lateNote} | preferred: ${preferred}\n${statsLines}`;
+
+      const currentLine = p.currentGamePositionStats.length > 0
+        ? `    THIS GAME +/-: ${p.currentGamePositionStats.map(s => `${s.position}: ${s.plusMinus >= 0 ? '+' : ''}${s.plusMinus}`).join(', ')}`
+        : '    THIS GAME: no goals yet';
+
+      const historyLines = p.positionStats.length > 0
+        ? p.positionStats.map(s =>
+            `      ${s.position}: ${s.plusMinusPer90 >= 0 ? '+' : ''}${s.plusMinusPer90.toFixed(2)}/90 | ${s.goals}G ${s.assists}A | total +/-${s.plusMinus} in ${s.minutesPlayed}min`
+          ).join('\n')
+        : '      No prior match history';
+
+      return `  id:${p.id} #${p.number} ${p.name} | ${p.minutesThisGame}min (projected at sub) | preferred: ${preferred}${lateNote}\n${currentLine}\n    HISTORICAL by position:\n${historyLines}`;
     })
     .join('\n\n');
 
@@ -405,9 +412,11 @@ HARD CONSTRAINTS (must be satisfied):
 ${mustPlayBlock}
 
 OPTIMIZATION (apply after constraints, in order):
-1. EQUALIZE TIME: Bring on players with fewer minutes first. Everyone should converge toward equal game time. For late arrivals (joined mid-game), equalize relative to their available window, not the full 90 minutes.
-2. MAXIMIZE +/-: Among players with similar game time, favour those with higher +/-/90min in the slot they'll fill.
-3. PREFERRED POSITIONS: Place players in preferred positions when possible.
+1. EQUALIZE TIME: Minutes shown are projected to the moment the sub happens (next 15-min mark). Bring on players with fewer projected minutes first so everyone converges toward equal game time. For late arrivals, equalize relative to their available window.
+2. MAXIMIZE +/-: Among players with similar projected minutes, prefer those with the higher combined plus/minus in the target position:
+   - Weight THIS GAME +/- most heavily (small sample but most relevant to today's match-up).
+   - Use HISTORICAL +/-/90min as a tiebreaker when current-game data is absent or equal.
+3. PREFERRED POSITIONS: Place players in their preferred positions when possible.
 
 FULL PLAYER DATA:
 ${allPlayerLines}
