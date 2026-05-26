@@ -243,7 +243,7 @@ export const GameActive = () => {
 
       const benchList = swapBench.map(p => ({
         playerId: p.id, name: p.name, number: p.number,
-        minutesThisGame: roundTo15(minutesMap.get(p.id) ?? 0),
+        minutesThisGame: minutesMap.get(p.id) ?? 0,
         mustPlayNext: prevBenchedIds.has(p.id),
         joinedAtMinute: lateArrivalTimes[p.id] ?? 0,
       }));
@@ -252,8 +252,8 @@ export const GameActive = () => {
         const isOnField = refOnFieldIds.has(p.id);
         const rawMins = minutesMap.get(p.id) ?? 0;
         const adjustedMins = isOnField
-          ? roundTo15(Math.max(0, rawMins - partialCurrentShift) + 15)
-          : roundTo15(rawMins);
+          ? Math.max(0, rawMins - partialCurrentShift) + 15
+          : rawMins;
         const posStats = positionStatsMap.get(p.id);
         const currentPosPm = currentGamePosPlusMinus.get(p.id);
         return {
@@ -527,7 +527,7 @@ export const GameActive = () => {
                           {aiRecPlayer ? (
                             <span className="inline-flex flex-col items-center leading-tight">
                               <span className="text-xs font-medium text-amber-300">{aiRecPlayer.name.split(' ')[0]}</span>
-                              <span className="text-[10px] text-amber-500">({aiRecSlot?.position ?? '?'}) {roundTo15(minutesMap.get(aiRecPlayer.id) ?? 0)}m</span>
+                              <span className="text-[10px] text-amber-500">({aiRecSlot?.position ?? '?'}) {minutesMap.get(aiRecPlayer.id) ?? 0}m</span>
                             </span>
                           ) : (
                             <span className="text-[10px] text-gray-600">—</span>
@@ -547,7 +547,7 @@ export const GameActive = () => {
                             const onSlot = referenceShift?.players.find(sp => sp.playerId === onP.id);
                             return (
                               <option key={onP.id} value={onP.id}>
-                                #{onP.number} {onP.name.split(' ')[0]} ({onSlot?.position ?? '?'}) {roundTo15(minutesMap.get(onP.id) ?? 0)}m
+                                #{onP.number} {onP.name.split(' ')[0]} ({onSlot?.position ?? '?'}) {minutesMap.get(onP.id) ?? 0}m
                               </option>
                             );
                           })}
