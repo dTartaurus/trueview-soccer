@@ -275,7 +275,6 @@ export const GameActive = () => {
         };
       });
 
-      const slotsCount = Math.min(attendingPlayers.length, 11);
       const res = await fetch('/api/claude', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -292,33 +291,23 @@ export const GameActive = () => {
             allPlayers: allPlayersData,
             activeGkId,
             isSecondHalf: game.currentHalf === 2,
-            slotsCount,
           },
         }),
       });
 
       const json = await res.json();
-      if (Array.isArray(json.startingLineup) && json.startingLineup.length >= 7) {
-        // Convert AI full lineup → swap map
-        const aiIds = new Set<string>((json.startingLineup as { playerId: string }[]).map(a => a.playerId));
-        const aiComingOff = [...referenceShift.players.filter(sp => !aiIds.has(sp.playerId))];
-        const aiComingOn = (json.startingLineup as { playerId: string; position: string }[])
-          .filter(a => !refOnFieldIds.has(a.playerId));
-
-        // Valid sets for validation — outgoing must be a non-GK on-field player
+      if (json.error) {
+        alert(`AI error: ${json.error}`);
+      } else if (Array.isArray(json.substitutions)) {
+        // API now returns direct substitution pairs — no diffing needed
         const validOutIds = new Set(swapOnField.filter(p => p.id !== activeGkId).map(p => p.id));
         const validInIds = new Set(swapBench.map(p => p.id));
 
         const newSwapMap: Record<string, string> = {};
-        for (const incoming of aiComingOn) {
-          if (!validInIds.has(incoming.playerId)) continue; // skip if not actually on bench
-          const byPos = aiComingOff.findIndex(off => off.position === incoming.position && validOutIds.has(off.playerId));
-          const match = byPos !== -1
-            ? aiComingOff.splice(byPos, 1)[0]
-            : aiComingOff.find(off => validOutIds.has(off.playerId))
-              ? aiComingOff.splice(aiComingOff.findIndex(off => validOutIds.has(off.playerId)), 1)[0]
-              : null;
-          if (match) newSwapMap[incoming.playerId] = match.playerId;
+        for (const sub of json.substitutions as { benchPlayerId: string; onFieldPlayerId: string }[]) {
+          if (validInIds.has(sub.benchPlayerId) && validOutIds.has(sub.onFieldPlayerId)) {
+            newSwapMap[sub.benchPlayerId] = sub.onFieldPlayerId;
+          }
         }
 
         setAiSwapMap(newSwapMap);
@@ -330,7 +319,7 @@ export const GameActive = () => {
         );
         setShowAiReasoning(true);
       } else {
-        alert(json.error ?? 'Could not generate recommendation. Try again.');
+        alert('Could not generate recommendation. Try again.');
       }
     } catch {
       alert('Could not connect to AI.');

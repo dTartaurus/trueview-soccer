@@ -394,78 +394,77 @@ async function handleShiftRecommendation(data: unknown, res: VercelResponse, ant
     .join('\n\n');
 
   const mustPlayBlock = mustPlayList.length > 0
-    ? mustPlayList.map((p, i) => `${i + 2}. id:${p.id} (#${p.number} ${p.name}) was benched last shift — MUST be on field.`).join('\n')
+    ? mustPlayList.map((p, i) => `${i + 2}. id:${p.playerId} (#${p.number} ${p.name}) was benched last shift — MUST come on.`).join('\n')
     : '2. No consecutive-bench violations to resolve.';
 
-  const prompt = `You are coaching "${teamName}" vs ${opponent}. Recommend the Shift ${nextShiftNumber} lineup (minutes ${(nextShiftNumber - 1) * 15}–${nextShiftNumber * 15}) using a ${formation} formation.
+  const prompt = `You are coaching "${teamName}" vs ${opponent}. It is minute ${gameMinute} (${isSecondHalf ? '2nd' : '1st'} half), ${formation} formation.
 
-Formation positions: ${formationPositions}
-Game minute now: ${gameMinute} | Half: ${isSecondHalf ? '2nd' : '1st'}
-GK locked: id:${activeGkId} (${activeGk?.name ?? ''}) — stays at GK, do not rotate.
+Decide which substitutions to make at the Shift ${nextShiftNumber} break (minute ${(nextShiftNumber - 1) * 15}).
+GK is locked: id:${activeGkId} (${activeGk?.name ?? ''}) — never substitute.
 
-CURRENT SHIFT ${nextShiftNumber - 1}:
+CURRENTLY ON FIELD (position | projected minutes at sub):
 ${currentLines}
 
-BENCH:
+BENCH (projected minutes at sub):
 ${benchLines}
 
-HARD CONSTRAINTS (must be satisfied):
-1. Keep id:${activeGkId} at GK.
+HARD CONSTRAINTS:
+1. Never substitute the GK (id:${activeGkId}).
 ${mustPlayBlock}
 
-OPTIMIZATION (apply after constraints, in order):
-1. EQUALIZE TIME: Minutes shown are projected to the moment the sub happens (next 15-min mark). Bring on players with fewer projected minutes first so everyone converges toward equal game time. For late arrivals, equalize relative to their available window.
-2. MAXIMIZE +/-: Among players with similar projected minutes, prefer those with the higher combined plus/minus in the target position:
-   - Weight THIS GAME +/- most heavily (small sample but most relevant to today's match-up).
-   - Use HISTORICAL +/-/90min as a tiebreaker when current-game data is absent or equal.
-3. PREFERRED POSITIONS: Place players in their preferred positions when possible.
+OPTIMIZATION — apply in this exact order:
+1. EQUALIZE TIME: Prioritise bringing on the bench players with the fewest projected minutes. Each bench player who comes on takes the position of the on-field player who comes off.
+2. PLUS/MINUS: Among players with similar minutes, prefer the bench player with the better +/- in the target position. Weight THIS GAME +/- most heavily; use HISTORICAL /90 as tiebreaker.
+3. PREFERRED POSITIONS: When multiple on-field players could come off, prefer the swap that puts the bench player into one of their preferred positions.
 
-FULL PLAYER DATA:
+PLAYER DATA (all attendees):
 ${allPlayerLines}
 
-Return exactly ${slotsCount} assignments using set_lineup.`;
+Use set_substitutions to list every swap you recommend. Return an empty array if no changes are needed.
+For each swap: benchPlayerId = the bench player coming ON, onFieldPlayerId = the on-field player going OFF, position = the slot being exchanged (must be a valid ${formation} position).`;
 
   const message = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
-    max_tokens: 2048,
+    max_tokens: 1024,
     system: SYSTEM,
     tools: [
       {
-        name: 'set_lineup',
-        description: `Shift ${nextShiftNumber} lineup recommendation`,
+        name: 'set_substitutions',
+        description: `Substitution recommendations for Shift ${nextShiftNumber}`,
         input_schema: {
           type: 'object' as const,
           properties: {
-            startingLineup: {
+            substitutions: {
               type: 'array' as const,
-              description: `${slotsCount} player-position assignments`,
+              description: 'List of player swaps. Empty array if no changes recommended.',
               items: {
                 type: 'object' as const,
                 properties: {
-                  playerId: { type: 'string' as const },
-                  position: { type: 'string' as const },
+                  benchPlayerId: { type: 'string' as const, description: 'id of bench player coming ON' },
+                  onFieldPlayerId: { type: 'string' as const, description: 'id of on-field player going OFF' },
+                  position: { type: 'string' as const, description: 'position slot being exchanged' },
                 },
-                required: ['playerId', 'position'],
+                required: ['benchPlayerId', 'onFieldPlayerId', 'position'],
               },
             },
             reasoning: {
               type: 'string' as const,
-              description: 'Who changed, why, and how time is being equalised',
+              description: 'Brief explanation: who changes, why, and how time is being equalised',
             },
           },
-          required: ['startingLineup', 'reasoning'],
+          required: ['substitutions', 'reasoning'],
         },
       },
     ],
-    tool_choice: { type: 'tool' as const, name: 'set_lineup' },
+    tool_choice: { type: 'tool' as const, name: 'set_substitutions' },
     messages: [{ role: 'user', content: prompt }],
   });
 
   const toolUse = message.content.find(b => b.type === 'tool_use');
   if (!toolUse || toolUse.type !== 'tool_use') {
-    return res.status(500).json({ error: 'AI did not return a structured lineup' });
+    return res.status(500).json({ error: 'AI did not return substitutions' });
   }
-  const result = toolUse.input as { startingLineup: { playerId: string; position: string }[]; reasoning: string };
+  const result = toolUse.input as { substitutions: { benchPlayerId: string; onFieldPlayerId: string; position: string }[]; reasoning: string };
   return res.status(200).json(result);
 }
 
