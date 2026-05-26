@@ -29,18 +29,17 @@ export const GameActive = () => {
   const [showGoalModal, setShowGoalModal] = useState(false);
   const [goalForm, setGoalForm] = useState({ scorerId: '', assistId: '', isOpponent: false });
 
-  // Next shift recommendation
-  const [nextShiftLineup, setNextShiftLineup] = useState<ShiftPlayer[] | null>(null);
-  const [nextShiftConfirmed, setNextShiftConfirmed] = useState(false);
+  // Swap map: benchPlayerId → onFieldPlayerId they replace (empty string = no change)
+  const [swapMap, setSwapMap] = useState<Record<string, string>>({});
+  const [swapsConfirmed, setSwapsConfirmed] = useState(false);
   const [aiLoadingShift, setAiLoadingShift] = useState(false);
   const [aiShiftReasoning, setAiShiftReasoning] = useState('');
-  const [showShiftReasoning, setShowShiftReasoning] = useState(false);
-  const [editingNextShift, setEditingNextShift] = useState(false);
+  const [showAiReasoning, setShowAiReasoning] = useState(false);
 
-  // Sub execute modal (shift change screen)
+  // Sub execute modal
   const [showSubModal, setShowSubModal] = useState(false);
 
-  // Stats + late arrival
+  // Stats + adjust players
   const [showStatsModal, setShowStatsModal] = useState(false);
   const [showLateArrivalModal, setShowLateArrivalModal] = useState(false);
   const [lateArrivalTimes, setLateArrivalTimes] = useState<Record<string, number>>({});
@@ -55,7 +54,7 @@ export const GameActive = () => {
   const benchPlayers = attendingPlayers.filter(p => !onFieldIds.has(p.id));
   const notAttending = players.filter(p => !game.attendance.includes(p.id)).sort((a, b) => a.number - b.number);
 
-  // Players who were benched last shift (must play next shift)
+  // Players who were benched last shift (must play next)
   const prevShift = activeShift
     ? game.shifts.find(s => s.shiftNumber === activeShift.shiftNumber - 1 && s.status === 'completed')
     : null;
@@ -82,7 +81,7 @@ export const GameActive = () => {
     [completedGames.length]
   );
 
-  // Plus/minus per player per position accumulated in THIS game so far
+  // Plus/minus per player per position in THIS game so far
   const currentGamePosPlusMinus = useMemo(() => {
     const result = new Map<string, Map<string, number>>();
     for (const shift of game.shifts) {
@@ -103,10 +102,36 @@ export const GameActive = () => {
     return result;
   }, [game.shifts, game.events, timer.gameMinute]);
 
-  // Diff between current and next shift
+  // Reference shift: the active shift during play, or last completed shift during half-time
+  const referenceShift = activeShift ??
+    [...game.shifts]
+      .filter(s => s.status === 'completed' && s.players.length > 0)
+      .sort((a, b) => b.shiftNumber - a.shiftNumber)[0] ??
+    null;
+  const refOnFieldIds = new Set((referenceShift?.players ?? []).map(sp => sp.playerId));
+  const swapOnField = attendingPlayers.filter(p => refOnFieldIds.has(p.id));
+  const swapBench = attendingPlayers.filter(p => !refOnFieldIds.has(p.id));
+
+  // Derive the next shift lineup from swapMap + reference shift
+  const nextShiftLineup = useMemo((): ShiftPlayer[] | null => {
+    if (!referenceShift) return null;
+    const outgoing = new Set(Object.values(swapMap).filter(Boolean));
+    const swapEntries = Object.entries(swapMap).filter(([, outId]) => !!outId);
+    const result: ShiftPlayer[] = referenceShift.players
+      .filter(sp => !outgoing.has(sp.playerId))
+      .map(sp => ({ ...sp }));
+    for (const [inId, outId] of swapEntries) {
+      const outSlot = referenceShift.players.find(sp => sp.playerId === outId);
+      if (outSlot) result.push({ playerId: inId, position: outSlot.position as Position });
+    }
+    return result;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [swapMap, referenceShift?.id]);
+
+  // Diff for display / sub modal
   const nextOnFieldIds = new Set((nextShiftLineup ?? []).map(p => p.playerId));
-  const comingOff = activeShift?.players.filter(p => !nextOnFieldIds.has(p.playerId)) ?? [];
-  const comingOn = (nextShiftLineup ?? []).filter(p => !onFieldIds.has(p.playerId));
+  const comingOff = (referenceShift?.players ?? []).filter(p => !nextOnFieldIds.has(p.playerId));
+  const comingOn = (nextShiftLineup ?? []).filter(p => !refOnFieldIds.has(p.playerId));
 
   // Stats per player for this game
   const gameGoals = useMemo(() => {
@@ -150,8 +175,8 @@ export const GameActive = () => {
       s.id === activeShift?.id ? { ...s, status: 'completed' as const } : s
     );
     await updateGame(game.id, { status: 'half-time', timerStartedAt: null, timerElapsed: 45 * 60, shifts });
-    setNextShiftLineup(null);
-    setNextShiftConfirmed(false);
+    setSwapMap({});
+    setSwapsConfirmed(false);
   };
   const startSecondHalf = async () => {
     if (!nextShiftLineup) return;
@@ -159,8 +184,8 @@ export const GameActive = () => {
       s.shiftNumber === 4 ? { ...s, status: 'active' as const, players: nextShiftLineup } : s
     );
     await updateGame(game.id, { status: 'second-half', currentHalf: 2, timerStartedAt: Date.now(), timerElapsed: 45 * 60, shifts });
-    setNextShiftLineup(null);
-    setNextShiftConfirmed(false);
+    setSwapMap({});
+    setSwapsConfirmed(false);
     setAiShiftReasoning('');
   };
   const endGame = async () => {
@@ -194,17 +219,17 @@ export const GameActive = () => {
     setShowGoalModal(false);
   };
 
-  // ── AI Shift Recommendation ──────────────────────────────────────────────────
-  const getShiftRecommendation = async (thenEdit = false) => {
-    if (!activeShift) return;
+  // ── AI Shift Recommendation ───────────────────────────────────────────────────
+  const getAiRecommendation = async () => {
+    if (!referenceShift) return;
     setAiLoadingShift(true);
-    setNextShiftLineup(null);
-    setNextShiftConfirmed(false);
     setAiShiftReasoning('');
     try {
-      // On-field players: assume they complete the full current 15-min shift
-      const partialCurrentShift = Math.max(0, timer.gameMinute - activeShift.startMinute);
-      const currentShiftPlayers = activeShift.players.map(sp => {
+      const partialCurrentShift = activeShift
+        ? Math.max(0, timer.gameMinute - activeShift.startMinute)
+        : 0;
+
+      const currentShiftPlayers = referenceShift.players.map(sp => {
         const p = players.find(pl => pl.id === sp.playerId);
         const completedMins = (minutesMap.get(sp.playerId) ?? 0) - partialCurrentShift;
         return {
@@ -213,14 +238,16 @@ export const GameActive = () => {
           minutesThisGame: roundTo15(Math.max(0, completedMins) + 15),
         };
       });
-      const benchList = benchPlayers.map(p => ({
+
+      const benchList = swapBench.map(p => ({
         playerId: p.id, name: p.name, number: p.number,
         minutesThisGame: roundTo15(minutesMap.get(p.id) ?? 0),
         mustPlayNext: prevBenchedIds.has(p.id),
         joinedAtMinute: lateArrivalTimes[p.id] ?? 0,
       }));
+
       const allPlayersData = attendingPlayers.map(p => {
-        const isOnField = onFieldIds.has(p.id);
+        const isOnField = refOnFieldIds.has(p.id);
         const rawMins = minutesMap.get(p.id) ?? 0;
         const adjustedMins = isOnField
           ? roundTo15(Math.max(0, rawMins - partialCurrentShift) + 15)
@@ -267,18 +294,28 @@ export const GameActive = () => {
           },
         }),
       });
+
       const json = await res.json();
       if (Array.isArray(json.startingLineup) && json.startingLineup.length >= 7) {
-        setNextShiftLineup(json.startingLineup.map((a: { playerId: string; position: string }) => ({
-          playerId: a.playerId, position: a.position as Position,
-        })));
-        setAiShiftReasoning(json.reasoning ?? '');
-        if (thenEdit) {
-          setEditingNextShift(true);
-          setShowShiftReasoning(false);
-        } else {
-          setShowShiftReasoning(true);
+        // Convert AI full lineup → swap map
+        const aiIds = new Set<string>((json.startingLineup as { playerId: string }[]).map(a => a.playerId));
+        const aiComingOff = [...referenceShift.players.filter(sp => !aiIds.has(sp.playerId))];
+        const aiComingOn = (json.startingLineup as { playerId: string; position: string }[])
+          .filter(a => !refOnFieldIds.has(a.playerId));
+
+        const newSwapMap: Record<string, string> = {};
+        for (const incoming of aiComingOn) {
+          const byPos = aiComingOff.findIndex(off => off.position === incoming.position);
+          if (byPos !== -1) {
+            newSwapMap[incoming.playerId] = aiComingOff.splice(byPos, 1)[0].playerId;
+          } else if (aiComingOff.length > 0) {
+            newSwapMap[incoming.playerId] = aiComingOff.splice(0, 1)[0].playerId;
+          }
         }
+        setSwapMap(newSwapMap);
+        setSwapsConfirmed(false);
+        setAiShiftReasoning(json.reasoning ?? '');
+        setShowAiReasoning(true);
       } else {
         alert(json.error ?? 'Could not generate recommendation. Try again.');
       }
@@ -301,17 +338,9 @@ export const GameActive = () => {
     });
     await updateGame(game.id, { shifts });
     setShowSubModal(false);
-    setNextShiftLineup(null);
-    setNextShiftConfirmed(false);
+    setSwapMap({});
+    setSwapsConfirmed(false);
     setAiShiftReasoning('');
-    setEditingNextShift(false);
-  };
-
-  // ── Swap player in next shift (edit mode) ─────────────────────────────────────
-  const swapNextShiftPlayer = (outId: string, inId: string) => {
-    if (!nextShiftLineup) return;
-    const updated = nextShiftLineup.map(sp => sp.playerId === outId ? { ...sp, playerId: inId } : sp);
-    setNextShiftLineup(updated);
   };
 
   // ── Late arrival / remove player ─────────────────────────────────────────────
@@ -326,6 +355,7 @@ export const GameActive = () => {
 
   const isLiveGame = ['first-half', 'second-half'].includes(game.status);
   const maxMin = attendingPlayers.length > 0 ? Math.max(1, ...attendingPlayers.map(p => minutesMap.get(p.id) ?? 0)) : 1;
+  const hasAnySwap = Object.values(swapMap).some(Boolean);
 
   return (
     <div className="flex flex-col h-screen bg-gray-900 text-white overflow-hidden">
@@ -366,13 +396,13 @@ export const GameActive = () => {
       {game.status === 'half-time' && (
         <div className="mx-3 mb-1 bg-blue-700 rounded-xl p-3 flex items-center gap-2 shrink-0">
           <span className="flex-1 font-bold text-sm">HALF TIME</span>
-          {isCoach && nextShiftConfirmed && (
+          {isCoach && swapsConfirmed && (
             <button onClick={startSecondHalf} className="bg-white text-blue-700 text-xs font-bold px-3 py-1.5 rounded-lg">
               Start 2nd Half →
             </button>
           )}
-          {isCoach && !nextShiftConfirmed && (
-            <span className="text-xs text-blue-200">Confirm Shift 4 below first</span>
+          {isCoach && !swapsConfirmed && (
+            <span className="text-xs text-blue-200">Confirm Shift 4 lineup below first</span>
           )}
         </div>
       )}
@@ -403,27 +433,6 @@ export const GameActive = () => {
                 );
               })}
             </div>
-            {benchPlayers.length > 0 && (
-              <div className="px-3 py-2 border-t border-gray-700">
-                <p className="text-xs text-gray-500 mb-1.5">BENCH</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {benchPlayers.map(p => {
-                    const mustPlay = prevBenchedIds.has(p.id);
-                    const mins = minutesMap.get(p.id) ?? 0;
-                    return (
-                      <span key={p.id}
-                        className={`text-xs px-2 py-1 rounded-full flex items-center gap-1 ${mustPlay ? 'bg-amber-700 text-white' : 'bg-gray-700 text-gray-300'}`}>
-                        #{p.number} {p.name.split(' ')[0]} · {mins}m
-                        {mustPlay && <span title="Must play next shift">↑</span>}
-                      </span>
-                    );
-                  })}
-                </div>
-                {Array.from(prevBenchedIds).some(pid => !onFieldIds.has(pid)) && (
-                  <p className="text-xs text-amber-400 mt-1">↑ = must play next shift (consecutive bench rule)</p>
-                )}
-              </div>
-            )}
           </div>
         ) : (
           <div className="bg-gray-800 rounded-xl p-4 text-center text-gray-500 text-sm">
@@ -431,192 +440,155 @@ export const GameActive = () => {
           </div>
         )}
 
-        {/* ── NEXT SHIFT RECOMMENDATION ── */}
+        {/* ── NEXT SHIFT — bench swap panel ── */}
         {isCoach && (isLiveGame || game.status === 'half-time') && (hasNextShift || game.status === 'half-time') && (
           <div className="bg-gray-800 rounded-xl overflow-hidden">
+
+            {/* Header */}
             <div className="px-3 py-2.5 border-b border-gray-700 flex items-center justify-between">
               <p className="text-xs font-semibold text-gray-300 uppercase tracking-wide">
                 {game.status === 'half-time'
-                  ? `Shift 4 · 45–60 min (2nd Half)`
+                  ? 'Shift 4 · 45–60 min (2nd Half)'
                   : `Next · Shift ${nextShiftNum} · ${(nextShiftNum - 1) * 15}–${nextShiftNum * 15} min`}
               </p>
-              {nextShiftConfirmed && !editingNextShift && (
+              {swapsConfirmed && (
                 <span className="text-xs text-pitch-400 flex items-center gap-1"><Check size={11} /> Confirmed</span>
               )}
             </div>
 
-            {/* Not yet fetched */}
-            {!nextShiftLineup && !aiLoadingShift && (
-              <div className="px-3 py-3 flex gap-2">
-                <button onClick={() => getShiftRecommendation(true)}
-                  className="flex-1 bg-amber-600 rounded-lg py-2.5 text-sm font-bold flex items-center justify-center gap-2 active:scale-95">
-                  <Zap size={15} /> Edit Lineup
-                </button>
-                <button onClick={() => getShiftRecommendation(false)}
-                  className="border border-amber-700 text-amber-400 rounded-lg py-2.5 px-3 text-xs font-medium active:scale-95">
-                  Preview Only
-                </button>
-              </div>
-            )}
+            <div className="px-3 py-3 space-y-3">
 
-            {/* Loading */}
-            {aiLoadingShift && (
-              <div className="px-3 py-5 flex flex-col items-center gap-2 text-gray-400">
-                <span className="w-5 h-5 border-2 border-gray-600 border-t-gray-300 rounded-full animate-spin" />
-                <span className="text-xs">Optimising for equal time + best +/−…</span>
-              </div>
-            )}
-
-            {/* Recommendation ready */}
-            {nextShiftLineup && !editingNextShift && (
-              <div className="px-3 py-2 space-y-2">
-                {/* AI reasoning */}
-                {aiShiftReasoning && (
-                  <div>
-                    <button onClick={() => setShowShiftReasoning(v => !v)}
-                      className="flex items-center gap-1 text-xs text-amber-500">
-                      <Zap size={11} />
-                      {showShiftReasoning ? 'Hide' : 'Show'} reasoning
-                      {showShiftReasoning ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
-                    </button>
-                    {showShiftReasoning && (
-                      <div className="mt-1.5 bg-gray-700/50 rounded-lg p-2.5 text-xs text-gray-300 leading-relaxed">
-                        {aiShiftReasoning}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Changes diff */}
-                {comingOff.length > 0 ? (
-                  <div className="space-y-1">
-                    {comingOff.map(off => {
-                      const inSlot = (nextShiftLineup ?? []).find(sp =>
-                        sp.position === off.position && !onFieldIds.has(sp.playerId)
-                      ) ?? comingOn[0];
-                      const offPlayer = players.find(p => p.id === off.playerId);
-                      const inPlayer = players.find(p => p.id === inSlot?.playerId);
-                      return (
-                        <div key={off.playerId} className="flex items-center gap-2 text-xs">
-                          <span className={`${POSITION_COLORS[off.position] ?? 'bg-gray-600'} text-white px-1.5 py-0.5 rounded text-xs font-bold w-10 text-center shrink-0`}>{off.position}</span>
-                          <span className="text-red-400 font-medium">OUT</span>
-                          <span className="text-gray-300">#{offPlayer?.number} {offPlayer?.name?.split(' ')[0]}</span>
-                          <span className="text-gray-600">→</span>
-                          <span className="text-pitch-400 font-medium">IN</span>
-                          <span className="text-gray-300">#{inPlayer?.number} {inPlayer?.name?.split(' ')[0]}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <p className="text-xs text-gray-500">No changes — same lineup continues</p>
-                )}
-
-                {/* Confirm / Edit buttons */}
-                <div className="flex gap-2 pt-1">
-                  <button onClick={() => { setEditingNextShift(true); setNextShiftConfirmed(false); }}
-                    className="flex-1 border border-gray-600 rounded-lg py-2 text-xs font-medium text-gray-300">
-                    Edit
-                  </button>
-                  {!nextShiftConfirmed ? (
-                    <button onClick={() => setNextShiftConfirmed(true)}
-                      className="flex-1 bg-pitch-700 rounded-lg py-2 text-xs font-bold flex items-center justify-center gap-1">
-                      <Check size={12} /> Confirm
-                    </button>
-                  ) : (
-                    <button onClick={() => getShiftRecommendation(false)} disabled={aiLoadingShift}
-                      className="flex-1 border border-amber-700 rounded-lg py-2 text-xs font-medium text-amber-400">
-                      Refresh AI
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* Edit mode */}
-            {nextShiftLineup && editingNextShift && (
-              <div className="px-3 py-2 space-y-2">
-                <p className="text-xs text-gray-400">
-                  <span className="inline-block w-2 h-2 rounded-full bg-amber-500 mr-1 align-middle" />
-                  AI change &nbsp;·&nbsp;
-                  <span className="inline-block w-2 h-2 rounded-full bg-gray-600 mr-1 align-middle" />
-                  No change &nbsp;·&nbsp; Tap dropdown to override
-                </p>
-                <div className="space-y-1.5">
-                  {nextShiftLineup.map(sp => {
-                    const p = players.find(pl => pl.id === sp.playerId);
-                    const isGk = sp.position === 'GK';
-                    const color = POSITION_COLORS[sp.position] ?? 'bg-gray-600';
-                    // Is this an AI-recommended change? (player wasn't on field before)
-                    const isChange = !onFieldIds.has(sp.playerId);
-                    // Who was on the field in this position before?
-                    const prevInSlot = activeShift?.players.find(s => s.position === sp.position);
-                    const prevPlayer = prevInSlot ? players.find(pl => pl.id === prevInSlot.playerId) : null;
+              {/* Bench list with swap dropdowns */}
+              {swapBench.length > 0 ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-gray-500 uppercase tracking-wide font-medium">
+                    Bench — select who each player replaces
+                  </p>
+                  {swapBench.map(benchP => {
+                    const mins = minutesMap.get(benchP.id) ?? 0;
+                    const mustPlay = prevBenchedIds.has(benchP.id);
+                    const selectedOutId = swapMap[benchP.id] ?? '';
+                    // On-field players already claimed by a different bench player
+                    const claimedByOthers = new Set(
+                      Object.entries(swapMap)
+                        .filter(([inId, outId]) => inId !== benchP.id && !!outId)
+                        .map(([, outId]) => outId)
+                    );
                     return (
-                      <div key={sp.playerId}
-                        className={`rounded-lg p-2 flex items-center gap-2 ${isChange ? 'bg-amber-900/30 border border-amber-700/40' : 'bg-gray-700/30'}`}>
-                        <span className={`${color} text-white text-xs font-bold px-1.5 py-0.5 rounded w-10 text-center shrink-0`}>{sp.position}</span>
+                      <div key={benchP.id}
+                        className={`rounded-xl px-3 py-2.5 flex items-center gap-2 ${mustPlay ? 'bg-amber-900/25 border border-amber-700/30' : 'bg-gray-700/40'}`}>
+                        {/* Must-play dot */}
+                        <div className={`w-2 h-2 rounded-full shrink-0 ${mustPlay ? 'bg-amber-400' : 'bg-gray-600'}`} />
+                        {/* Player info */}
                         <div className="flex-1 min-w-0">
-                          {isChange && prevPlayer && (
-                            <p className="text-xs text-gray-500 leading-none mb-0.5">
-                              was: #{prevPlayer.number} {prevPlayer.name.split(' ')[0]}
-                            </p>
-                          )}
-                          <p className={`text-xs font-medium leading-none ${isChange ? 'text-amber-300' : 'text-gray-300'}`}>
-                            {isChange && <span className="mr-1">AI→</span>}
-                            #{p?.number} {p?.name?.split(' ')[0]}
-                          </p>
+                          <span className="text-xs text-gray-400">#{benchP.number} </span>
+                          <span className="text-sm font-medium">{benchP.name.split(' ')[0]}</span>
+                          <span className="text-xs text-gray-500 ml-1.5">{mins}m</span>
+                          {mustPlay && <span className="text-xs text-amber-400 ml-1.5">↑ must play</span>}
                         </div>
-                        {isGk ? (
-                          <span className="text-xs text-yellow-500 shrink-0">🔒</span>
-                        ) : (
-                          <select
-                            className="bg-gray-800 text-white text-xs rounded px-1 py-0.5 border border-gray-600 max-w-[110px] shrink-0"
-                            value={sp.playerId}
-                            onChange={e => swapNextShiftPlayer(sp.playerId, e.target.value)}
-                          >
-                            <option value={sp.playerId}>#{p?.number} {p?.name?.split(' ')[0]} ✓AI</option>
-                            {/* Offer current field player as easy revert */}
-                            {isChange && prevPlayer && prevPlayer.id !== sp.playerId && (
-                              <option value={prevPlayer.id}>
-                                #{prevPlayer.number} {prevPlayer.name.split(' ')[0]} (keep)
-                              </option>
-                            )}
-                            {attendingPlayers
-                              .filter(bp => bp.id !== sp.playerId && bp.id !== prevPlayer?.id && (!nextOnFieldIds.has(bp.id) || bp.id === sp.playerId))
-                              .map(bp => (
-                                <option key={bp.id} value={bp.id}>
-                                  #{bp.number} {bp.name.split(' ')[0]} ({roundTo15(minutesMap.get(bp.id) ?? 0)}m)
+                        {/* Replaces dropdown */}
+                        <select
+                          value={selectedOutId}
+                          onChange={e => {
+                            setSwapMap(prev => ({ ...prev, [benchP.id]: e.target.value }));
+                            setSwapsConfirmed(false);
+                          }}
+                          className="bg-gray-800 text-white text-xs rounded-lg px-2 py-1.5 border border-gray-600 shrink-0 max-w-[150px]"
+                        >
+                          <option value="">— stays bench —</option>
+                          {swapOnField
+                            .filter(onP => onP.id !== activeGkId) // GK cannot come off
+                            .sort((a, b) => (minutesMap.get(b.id) ?? 0) - (minutesMap.get(a.id) ?? 0))
+                            .map(onP => {
+                              const onSlot = referenceShift?.players.find(sp => sp.playerId === onP.id);
+                              const claimed = claimedByOthers.has(onP.id);
+                              return (
+                                <option key={onP.id} value={onP.id} disabled={claimed}>
+                                  #{onP.number} {onP.name.split(' ')[0]} ({onSlot?.position ?? '?'}) {roundTo15(minutesMap.get(onP.id) ?? 0)}m{claimed ? ' ✗' : ''}
                                 </option>
-                              ))}
-                          </select>
-                        )}
+                              );
+                            })}
+                        </select>
                       </div>
                     );
                   })}
                 </div>
-                <div className="flex gap-2 pt-1">
-                  <button onClick={() => setEditingNextShift(false)}
-                    className="flex-1 border border-gray-600 rounded-lg py-2 text-xs font-medium text-gray-300">
-                    Cancel
+              ) : (
+                <p className="text-xs text-gray-500 text-center py-1">All players are on the field</p>
+              )}
+
+              {/* AI Recommended Changes button */}
+              <button
+                onClick={getAiRecommendation}
+                disabled={aiLoadingShift}
+                className="w-full bg-amber-600 rounded-xl py-2.5 text-sm font-bold flex items-center justify-center gap-2 active:scale-95 disabled:opacity-50 transition-transform"
+              >
+                {aiLoadingShift ? (
+                  <>
+                    <span className="w-4 h-4 border-2 border-amber-300/40 border-t-amber-100 rounded-full animate-spin" />
+                    Analysing time & +/−…
+                  </>
+                ) : (
+                  <><Zap size={15} /> AI Recommended Changes</>
+                )}
+              </button>
+
+              {/* AI reasoning (collapsible) */}
+              {aiShiftReasoning && (
+                <div>
+                  <button
+                    onClick={() => setShowAiReasoning(v => !v)}
+                    className="flex items-center gap-1 text-xs text-amber-400"
+                  >
+                    <Zap size={11} />
+                    {showAiReasoning ? 'Hide' : 'Show'} AI reasoning
+                    {showAiReasoning ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
                   </button>
-                  <button onClick={() => { setEditingNextShift(false); setNextShiftConfirmed(true); }}
-                    className="flex-1 bg-pitch-700 rounded-lg py-2 text-xs font-bold flex items-center justify-center gap-1">
-                    <Check size={12} /> Save & Confirm
+                  {showAiReasoning && (
+                    <div className="mt-1.5 bg-amber-900/20 border border-amber-800/30 rounded-lg p-2.5 text-xs text-gray-300 leading-relaxed">
+                      {aiShiftReasoning}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Clear all swaps */}
+              {hasAnySwap && (
+                <button
+                  onClick={() => { setSwapMap({}); setSwapsConfirmed(false); }}
+                  className="w-full border border-gray-600 rounded-xl py-2 text-xs text-gray-400 active:scale-95 transition-transform"
+                >
+                  Clear All Changes
+                </button>
+              )}
+
+              {/* Confirm / confirmed state */}
+              {!swapsConfirmed ? (
+                <button
+                  onClick={() => setSwapsConfirmed(true)}
+                  className="w-full bg-pitch-700 rounded-xl py-3 text-sm font-bold flex items-center justify-center gap-2 active:scale-95 transition-transform"
+                >
+                  <Check size={15} /> Confirm Changes
+                </button>
+              ) : (
+                <div className="flex items-center gap-2 bg-pitch-900/30 border border-pitch-700/40 rounded-xl px-3 py-2.5">
+                  <Check size={14} className="text-pitch-400 shrink-0" />
+                  <span className="text-sm text-pitch-300 flex-1 font-medium">
+                    {hasAnySwap ? `${Object.values(swapMap).filter(Boolean).length} change(s) confirmed` : 'Same lineup confirmed'}
+                  </span>
+                  <button onClick={() => setSwapsConfirmed(false)} className="text-xs text-gray-500 underline shrink-0">
+                    Edit
                   </button>
                 </div>
-              </div>
-            )}
+              )}
+            </div>
           </div>
         )}
 
-        {/* ── Playing Time (collapsible) ── */}
+        {/* ── Playing Time ── */}
         <div className="bg-gray-800 rounded-xl overflow-hidden">
           <div className="flex items-center px-3 py-2.5">
-            <button className="flex-1 flex items-center gap-2 text-left text-xs font-semibold text-gray-400 uppercase tracking-wide"
-              onClick={() => {}}>
-              Playing Time
-            </button>
+            <p className="flex-1 text-xs font-semibold text-gray-400 uppercase tracking-wide">Playing Time</p>
             {isCoach && (notAttending.length > 0 || benchPlayers.length > 0) && (
               <button onClick={() => setShowLateArrivalModal(true)}
                 className="flex items-center gap-1 text-xs text-pitch-400 border border-pitch-700 px-2 py-1 rounded-lg">
@@ -658,8 +630,8 @@ export const GameActive = () => {
             </button>
             <button
               onClick={() => setShowSubModal(true)}
-              disabled={!nextShiftConfirmed}
-              className={`flex-1 rounded-xl py-3 flex flex-col items-center gap-0.5 active:scale-95 transition-colors ${nextShiftConfirmed ? 'bg-blue-700' : 'bg-gray-700 opacity-50'}`}>
+              disabled={!swapsConfirmed}
+              className={`flex-1 rounded-xl py-3 flex flex-col items-center gap-0.5 active:scale-95 transition-colors ${swapsConfirmed ? 'bg-blue-700' : 'bg-gray-700 opacity-50'}`}>
               <span className="text-base font-bold">⇄</span>
               <span className="text-xs font-medium">Sub</span>
             </button>
@@ -737,19 +709,19 @@ export const GameActive = () => {
           <div className="w-full bg-gray-800 rounded-t-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
             <div className="bg-gray-700 px-5 py-4">
               <h3 className="text-lg font-bold">Shift {activeShift.shiftNumber} → Shift {nextShiftNum}</h3>
-              <p className="text-xs text-gray-400 mt-0.5">
-                {(nextShiftNum - 1) * 15}–{nextShiftNum * 15} min
-              </p>
+              <p className="text-xs text-gray-400 mt-0.5">{(nextShiftNum - 1) * 15}–{nextShiftNum * 15} min</p>
             </div>
             <div className="px-5 py-4 space-y-3 max-h-[50vh] overflow-y-auto">
               {comingOff.length > 0 ? (
                 <>
                   <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Changes</p>
                   {comingOff.map(off => {
-                    const inSlot = nextShiftLineup.find(sp => sp.position === off.position && !onFieldIds.has(sp.playerId))
-                      ?? comingOn[0];
+                    const inPlayer = comingOn.find(sp => {
+                      const outId = swapMap[sp.playerId];
+                      return outId === off.playerId;
+                    }) ?? comingOn[0];
                     const offPlayer = players.find(p => p.id === off.playerId);
-                    const inPlayer = players.find(p => p.id === inSlot?.playerId);
+                    const inPlayerFull = players.find(p => p.id === inPlayer?.playerId);
                     return (
                       <div key={off.playerId} className="flex items-center gap-3 bg-gray-700/50 rounded-xl p-3">
                         <span className={`${POSITION_COLORS[off.position] ?? 'bg-gray-600'} text-white text-xs font-bold px-2 py-1 rounded w-12 text-center shrink-0`}>{off.position}</span>
@@ -760,7 +732,7 @@ export const GameActive = () => {
                           </div>
                           <div className="flex items-center gap-2 text-sm mt-0.5">
                             <span className="text-pitch-400 font-semibold">IN  </span>
-                            <span className="text-white">#{inPlayer?.number} {inPlayer?.name}</span>
+                            <span className="text-white">#{inPlayerFull?.number} {inPlayerFull?.name}</span>
                           </div>
                         </div>
                       </div>
@@ -770,12 +742,11 @@ export const GameActive = () => {
               ) : (
                 <p className="text-sm text-gray-400 text-center py-2">Same lineup — no player changes</p>
               )}
-              {/* Staying players */}
-              {nextShiftLineup.filter(sp => onFieldIds.has(sp.playerId)).length > 0 && (
+              {nextShiftLineup.filter(sp => refOnFieldIds.has(sp.playerId)).length > 0 && (
                 <div>
                   <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Staying On</p>
                   <div className="flex flex-wrap gap-1.5">
-                    {nextShiftLineup.filter(sp => onFieldIds.has(sp.playerId)).map(sp => {
+                    {nextShiftLineup.filter(sp => refOnFieldIds.has(sp.playerId)).map(sp => {
                       const p = players.find(pl => pl.id === sp.playerId);
                       return (
                         <span key={sp.playerId} className="bg-gray-700 text-gray-300 text-xs px-2 py-1 rounded-full">
@@ -874,7 +845,7 @@ export const GameActive = () => {
             {benchPlayers.length > 0 && (
               <div>
                 <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Remove Player</p>
-                <p className="text-xs text-gray-500 mb-3">Only bench players can be removed. On-field players cannot be removed mid-shift.</p>
+                <p className="text-xs text-gray-500 mb-3">Only bench players can be removed.</p>
                 <div className="grid grid-cols-2 gap-2">
                   {benchPlayers.map(p => {
                     const mins = minutesMap.get(p.id) ?? 0;
@@ -895,7 +866,7 @@ export const GameActive = () => {
             )}
 
             {notAttending.length === 0 && benchPlayers.length === 0 && (
-              <p className="text-sm text-gray-500 text-center py-4">All players are on the field — no adjustments available.</p>
+              <p className="text-sm text-gray-500 text-center py-4">No adjustments available.</p>
             )}
           </div>
         </div>
