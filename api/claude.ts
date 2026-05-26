@@ -245,9 +245,9 @@ async function handleLineupStructured(data: unknown, res: VercelResponse, anthro
   const playerLines = players
     .sort((a, b) => a.number - b.number)
     .map(p => {
-      const preferred = p.preferredPositions.length > 0 ? p.preferredPositions.join(', ') : 'flexible';
-      const statsLines = p.positionStats.length > 0
-        ? p.positionStats.map(s =>
+      const preferred = (p.preferredPositions ?? []).length > 0 ? p.preferredPositions.join(', ') : 'flexible';
+      const statsLines = (p.positionStats ?? []).length > 0
+        ? (p.positionStats ?? []).map(s =>
             `      ${s.position}: ${s.minutesPlayed}min | ${s.goals}G | ${s.assists}A | +/-${s.plusMinus} | ${(s.goalsPerMinute * 90).toFixed(2)}G/90 | ${(s.assistsPerMinute * 90).toFixed(2)}A/90`
           ).join('\n')
         : '      No match history yet';
@@ -374,15 +374,17 @@ async function handleShiftRecommendation(data: unknown, res: VercelResponse, ant
   const allPlayerLines = allPlayers
     .sort((a, b) => a.number - b.number)
     .map(p => {
-      const preferred = p.preferredPositions.length > 0 ? p.preferredPositions.join(', ') : 'flexible';
+      const preferred = (p.preferredPositions ?? []).length > 0 ? p.preferredPositions.join(', ') : 'flexible';
       const lateNote = p.joinedAtMinute ? ` | joined min ${p.joinedAtMinute} (max ~${90 - p.joinedAtMinute}min available)` : '';
 
-      const currentLine = p.currentGamePositionStats.length > 0
-        ? `    THIS GAME +/-: ${p.currentGamePositionStats.map(s => `${s.position}: ${s.plusMinus >= 0 ? '+' : ''}${s.plusMinus}`).join(', ')}`
+      const currentStats = p.currentGamePositionStats ?? [];
+      const currentLine = currentStats.length > 0
+        ? `    THIS GAME +/-: ${currentStats.map(s => `${s.position}: ${s.plusMinus >= 0 ? '+' : ''}${s.plusMinus}`).join(', ')}`
         : '    THIS GAME: no goals yet';
 
-      const historyLines = p.positionStats.length > 0
-        ? p.positionStats.map(s =>
+      const histStats = p.positionStats ?? [];
+      const historyLines = histStats.length > 0
+        ? histStats.map(s =>
             `      ${s.position}: ${s.plusMinusPer90 >= 0 ? '+' : ''}${s.plusMinusPer90.toFixed(2)}/90 | ${s.goals}G ${s.assists}A | total +/-${s.plusMinus} in ${s.minutesPlayed}min`
           ).join('\n')
         : '      No prior match history';
