@@ -386,6 +386,19 @@ export const buildGameSheet = (game: Game, players: Player[]): string => {
   }
 
   lines.push(`Team: ${teamGoals}G scored · ${oppGoals}G allowed`);
+
+  const opponentEvents = game.events
+    .filter(e => e.type === 'goal' && e.isOpponentGoal)
+    .sort((a, b) => a.minute - b.minute);
+  if (opponentEvents.length > 0) {
+    lines.push('');
+    lines.push(`GOALS AGAINST (${game.opponent})`);
+    for (const ev of opponentEvents) {
+      const who = ev.opponentScorerNumber ? `#${ev.opponentScorerNumber}` : 'unknown';
+      lines.push(`  ${ev.minute}' · ${who}`);
+    }
+  }
+
   return lines.join('\n').trimEnd();
 };
 

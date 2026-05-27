@@ -38,6 +38,7 @@ export interface GameEvent {
   playerId: string;
   assistPlayerIds?: string[];
   isOpponentGoal: boolean;
+  opponentScorerNumber?: number;
   position?: Position;
 }
 

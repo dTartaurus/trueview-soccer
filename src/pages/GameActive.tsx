@@ -25,9 +25,12 @@ export const GameActive = () => {
 
   // Goal modal
   const [showGoalModal, setShowGoalModal] = useState(false);
-  const [goalForm, setGoalForm] = useState<{ scorerId: string; assistIds: string[]; isOpponent: boolean }>(
-    { scorerId: '', assistIds: [], isOpponent: false }
-  );
+  const [goalForm, setGoalForm] = useState<{
+    scorerId: string;
+    assistIds: string[];
+    isOpponent: boolean;
+    opponentNumber: string;
+  }>({ scorerId: '', assistIds: [], isOpponent: false, opponentNumber: '' });
   const MAX_ASSISTS = 5;
 
   // Swap map: benchPlayerId → onFieldPlayerId they replace (empty string = no change)
@@ -223,17 +226,21 @@ export const GameActive = () => {
   // ── Goal ─────────────────────────────────────────────────────────────────────
   const logGoal = async () => {
     if (!goalForm.scorerId && !goalForm.isOpponent) return;
+    const oppNumParsed = parseInt(goalForm.opponentNumber, 10);
     const event: GameEvent = {
       id: generateId(), type: 'goal', minute: timer.gameMinute,
       playerId: goalForm.scorerId,
       assistPlayerIds: goalForm.assistIds.length > 0 ? goalForm.assistIds : undefined,
       isOpponentGoal: goalForm.isOpponent,
+      opponentScorerNumber: goalForm.isOpponent && Number.isFinite(oppNumParsed) && oppNumParsed > 0
+        ? oppNumParsed
+        : undefined,
     };
     const score = goalForm.isOpponent
       ? { ...game.score, away: game.score.away + 1 }
       : { ...game.score, home: game.score.home + 1 };
     await updateGame(game.id, { events: [...game.events, event], score });
-    setGoalForm({ scorerId: '', assistIds: [], isOpponent: false });
+    setGoalForm({ scorerId: '', assistIds: [], isOpponent: false, opponentNumber: '' });
     setShowGoalModal(false);
   };
 
@@ -778,11 +785,26 @@ export const GameActive = () => {
             <h3 className="text-lg font-bold mb-4">Log Goal</h3>
             <div className="space-y-3">
               <div className="flex gap-2">
-                <button onClick={() => setGoalForm(f => ({ ...f, isOpponent: false }))}
+                <button onClick={() => setGoalForm(f => ({ ...f, isOpponent: false, opponentNumber: '' }))}
                   className={`flex-1 py-2 rounded-lg font-medium text-sm ${!goalForm.isOpponent ? 'bg-pitch-700' : 'bg-gray-700'}`}>Our Goal</button>
-                <button onClick={() => setGoalForm(f => ({ ...f, isOpponent: true, scorerId: '' }))}
+                <button onClick={() => setGoalForm(f => ({ ...f, isOpponent: true, scorerId: '', assistIds: [] }))}
                   className={`flex-1 py-2 rounded-lg font-medium text-sm ${goalForm.isOpponent ? 'bg-red-700' : 'bg-gray-700'}`}>Their Goal</button>
               </div>
+              {goalForm.isOpponent && (
+                <div>
+                  <label className="text-xs text-gray-400 mb-1 block">Opposing scorer's number (optional)</label>
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
+                    max={99}
+                    placeholder="e.g. 9"
+                    value={goalForm.opponentNumber}
+                    onChange={e => setGoalForm(f => ({ ...f, opponentNumber: e.target.value.replace(/[^0-9]/g, '').slice(0, 2) }))}
+                    className="w-24 bg-gray-700 text-white text-center text-base rounded-lg px-3 py-2 border border-gray-600"
+                  />
+                </div>
+              )}
               {!goalForm.isOpponent && (() => {
                 const onFieldPlayers = (activeShift?.players ?? [])
                   .map(sp => players.find(p => p.id === sp.playerId))
@@ -932,6 +954,31 @@ export const GameActive = () => {
               <button onClick={() => setShowStatsModal(false)} className="text-gray-400 text-xl">✕</button>
             </div>
             <div className="px-4 py-3 space-y-2">
+              {(() => {
+                const oppGoals = game.events
+                  .filter(e => e.type === 'goal' && e.isOpponentGoal)
+                  .sort((a, b) => a.minute - b.minute);
+                if (oppGoals.length === 0) return null;
+                return (
+                  <div className="bg-red-900/20 border border-red-800/40 rounded-xl p-3 mb-2">
+                    <p className="text-xs font-semibold text-red-300 uppercase tracking-wide mb-2">
+                      Goals Against ({oppGoals.length})
+                    </p>
+                    <div className="space-y-1">
+                      {oppGoals.map(ev => (
+                        <div key={ev.id} className="flex items-center gap-3 text-sm">
+                          <span className="text-gray-400 w-10 shrink-0">{ev.minute}'</span>
+                          <span className="text-red-200">
+                            {ev.opponentScorerNumber
+                              ? `${game.opponent} #${ev.opponentScorerNumber}`
+                              : `${game.opponent} (number not recorded)`}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
               {[...attendingPlayers]
                 .sort((a, b) => (minutesMap.get(b.id) ?? 0) - (minutesMap.get(a.id) ?? 0))
                 .map(p => {
