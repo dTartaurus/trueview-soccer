@@ -25,7 +25,10 @@ export const GameActive = () => {
 
   // Goal modal
   const [showGoalModal, setShowGoalModal] = useState(false);
-  const [goalForm, setGoalForm] = useState({ scorerId: '', assistId: '', isOpponent: false });
+  const [goalForm, setGoalForm] = useState<{ scorerId: string; assistIds: string[]; isOpponent: boolean }>(
+    { scorerId: '', assistIds: [], isOpponent: false }
+  );
+  const MAX_ASSISTS = 5;
 
   // Swap map: benchPlayerId → onFieldPlayerId they replace (empty string = no change)
   const [swapMap, setSwapMap] = useState<Record<string, string>>({});
@@ -145,7 +148,9 @@ export const GameActive = () => {
     for (const ev of game.events) {
       if (ev.type === 'goal' && !ev.isOpponentGoal) {
         if (ev.playerId) goals.set(ev.playerId, (goals.get(ev.playerId) ?? 0) + 1);
-        if (ev.assistPlayerId) assists.set(ev.assistPlayerId, (assists.get(ev.assistPlayerId) ?? 0) + 1);
+        for (const aId of ev.assistPlayerIds ?? []) {
+          assists.set(aId, (assists.get(aId) ?? 0) + 1);
+        }
       }
     }
     return { goals, assists };
@@ -220,14 +225,15 @@ export const GameActive = () => {
     if (!goalForm.scorerId && !goalForm.isOpponent) return;
     const event: GameEvent = {
       id: generateId(), type: 'goal', minute: timer.gameMinute,
-      playerId: goalForm.scorerId, assistPlayerId: goalForm.assistId || undefined,
+      playerId: goalForm.scorerId,
+      assistPlayerIds: goalForm.assistIds.length > 0 ? goalForm.assistIds : undefined,
       isOpponentGoal: goalForm.isOpponent,
     };
     const score = goalForm.isOpponent
       ? { ...game.score, away: game.score.away + 1 }
       : { ...game.score, home: game.score.home + 1 };
     await updateGame(game.id, { events: [...game.events, event], score });
-    setGoalForm({ scorerId: '', assistId: '', isOpponent: false });
+    setGoalForm({ scorerId: '', assistIds: [], isOpponent: false });
     setShowGoalModal(false);
   };
 
@@ -777,32 +783,69 @@ export const GameActive = () => {
                 <button onClick={() => setGoalForm(f => ({ ...f, isOpponent: true, scorerId: '' }))}
                   className={`flex-1 py-2 rounded-lg font-medium text-sm ${goalForm.isOpponent ? 'bg-red-700' : 'bg-gray-700'}`}>Their Goal</button>
               </div>
-              {!goalForm.isOpponent && (
-                <>
-                  <div>
-                    <label className="text-xs text-gray-400 mb-1 block">Scorer</label>
-                    <div className="grid grid-cols-2 gap-1.5 max-h-40 overflow-y-auto">
-                      {attendingPlayers.map(p => (
-                        <button key={p.id} onClick={() => setGoalForm(f => ({ ...f, scorerId: p.id }))}
-                          className={`text-sm py-1.5 px-2 rounded-lg ${goalForm.scorerId === p.id ? 'bg-amber-600' : 'bg-gray-700'}`}>
-                          #{p.number} {p.name.split(' ')[0]}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div>
-                    <label className="text-xs text-gray-400 mb-1 block">Assist (optional)</label>
-                    <div className="grid grid-cols-2 gap-1.5 max-h-32 overflow-y-auto">
-                      {attendingPlayers.filter(p => p.id !== goalForm.scorerId).map(p => (
-                        <button key={p.id} onClick={() => setGoalForm(f => ({ ...f, assistId: f.assistId === p.id ? '' : p.id }))}
-                          className={`text-sm py-1.5 px-2 rounded-lg ${goalForm.assistId === p.id ? 'bg-blue-700' : 'bg-gray-700'}`}>
-                          #{p.number} {p.name.split(' ')[0]}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </>
-              )}
+              {!goalForm.isOpponent && (() => {
+                const onFieldPlayers = (activeShift?.players ?? [])
+                  .map(sp => players.find(p => p.id === sp.playerId))
+                  .filter((p): p is NonNullable<typeof p> => !!p)
+                  .sort((a, b) => a.number - b.number);
+                const assistCandidates = onFieldPlayers.filter(p => p.id !== goalForm.scorerId);
+                const atAssistLimit = goalForm.assistIds.length >= MAX_ASSISTS;
+                return (
+                  <>
+                    {onFieldPlayers.length === 0 ? (
+                      <p className="text-xs text-gray-400 italic">No active shift — start one first.</p>
+                    ) : (
+                      <>
+                        <div>
+                          <label className="text-xs text-gray-400 mb-1 block">Scorer (on-field only)</label>
+                          <div className="grid grid-cols-2 gap-1.5 max-h-40 overflow-y-auto">
+                            {onFieldPlayers.map(p => (
+                              <button key={p.id}
+                                onClick={() => setGoalForm(f => ({
+                                  ...f,
+                                  scorerId: p.id,
+                                  assistIds: f.assistIds.filter(id => id !== p.id),
+                                }))}
+                                className={`text-sm py-1.5 px-2 rounded-lg ${goalForm.scorerId === p.id ? 'bg-amber-600' : 'bg-gray-700'}`}>
+                                #{p.number} {p.name.split(' ')[0]}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div>
+                          <label className="text-xs text-gray-400 mb-1 flex items-center justify-between">
+                            <span>Assists (optional · {goalForm.assistIds.length}/{MAX_ASSISTS})</span>
+                            {goalForm.assistIds.length > 0 && (
+                              <button onClick={() => setGoalForm(f => ({ ...f, assistIds: [] }))}
+                                className="text-[10px] text-gray-500 underline">clear</button>
+                            )}
+                          </label>
+                          <div className="grid grid-cols-2 gap-1.5 max-h-32 overflow-y-auto">
+                            {assistCandidates.map(p => {
+                              const idx = goalForm.assistIds.indexOf(p.id);
+                              const selected = idx !== -1;
+                              const disabled = !selected && atAssistLimit;
+                              return (
+                                <button key={p.id} disabled={disabled}
+                                  onClick={() => setGoalForm(f => ({
+                                    ...f,
+                                    assistIds: selected
+                                      ? f.assistIds.filter(id => id !== p.id)
+                                      : [...f.assistIds, p.id],
+                                  }))}
+                                  className={`text-sm py-1.5 px-2 rounded-lg flex items-center justify-between gap-1 ${selected ? 'bg-blue-700' : 'bg-gray-700'} disabled:opacity-40`}>
+                                  <span>#{p.number} {p.name.split(' ')[0]}</span>
+                                  {selected && <span className="text-[10px] bg-blue-900 px-1 rounded">{idx + 1}</span>}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </>
+                );
+              })()}
               <button onClick={logGoal} disabled={!goalForm.isOpponent && !goalForm.scorerId}
                 className="w-full bg-amber-600 py-3 rounded-xl font-bold disabled:opacity-50">
                 {goalForm.isOpponent ? 'Log Opponent Goal' : 'Log Goal'}

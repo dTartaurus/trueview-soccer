@@ -136,7 +136,7 @@ export const PlayerProfile = () => {
             <div className="space-y-2">
               {recentGames.map(game => {
                 const goals = game.events.filter(e => e.playerId === id && e.type === 'goal' && !e.isOpponentGoal).length;
-                const assists = game.events.filter(e => e.assistPlayerId === id).length;
+                const assists = game.events.filter(e => e.assistPlayerIds?.includes(id ?? '')).length;
                 const shift = game.shifts.filter(s =>
                   s.status === 'completed' && s.players.some(sp => sp.playerId === id)
                 );

@@ -87,7 +87,7 @@ export const computeSeasonStats = (
             goals++;
             plusMinus++;
           }
-          if (ev.assistPlayerId === pid) assists++;
+          if (ev.assistPlayerIds?.includes(pid)) assists++;
           if (ev.type === 'goal') {
             // Positive plus-minus for all players on field when team scores
             const shift = game.shifts.find(
@@ -285,7 +285,7 @@ export const computePlayerPositionStats = (
           } else if (ev.type === 'goal') {
             if (ev.playerId === sp.playerId) { stat.goals++; stat.plusMinus++; }
             else { stat.plusMinus++; }
-            if (ev.assistPlayerId === sp.playerId) stat.assists++;
+            if (ev.assistPlayerIds?.includes(sp.playerId)) stat.assists++;
           }
         }
       }

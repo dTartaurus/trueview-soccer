@@ -36,7 +36,7 @@ export interface GameEvent {
   type: 'goal' | 'yellow_card' | 'red_card';
   minute: number;
   playerId: string;
-  assistPlayerId?: string;
+  assistPlayerIds?: string[];
   isOpponentGoal: boolean;
   position?: Position;
 }
