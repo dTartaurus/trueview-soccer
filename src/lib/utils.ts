@@ -294,6 +294,101 @@ export const computePlayerPositionStats = (
   return result;
 };
 
+// Build a shareable plain-text game sheet for any game with shifts/events.
+// Per-player rows include total play time (including GK), positions played,
+// goals, assists, goals against (opponent goals while on field), and +/-.
+export const buildGameSheet = (game: Game, players: Player[]): string => {
+  const attending = players
+    .filter(p => game.attendance.includes(p.id))
+    .sort((a, b) => a.number - b.number);
+
+  const totalMinutes = new Map<string, number>();
+  const positionsPlayed = new Map<string, Set<string>>();
+  const liveMinute = Math.floor(game.timerElapsed / 60);
+
+  for (const shift of game.shifts) {
+    if (shift.status !== 'completed' && shift.status !== 'active') continue;
+    const duration = shift.status === 'completed'
+      ? shift.endMinute - shift.startMinute
+      : Math.max(0, liveMinute - shift.startMinute);
+    for (const sp of shift.players) {
+      totalMinutes.set(sp.playerId, (totalMinutes.get(sp.playerId) ?? 0) + duration);
+      if (!positionsPlayed.has(sp.playerId)) positionsPlayed.set(sp.playerId, new Set());
+      positionsPlayed.get(sp.playerId)!.add(sp.position);
+    }
+  }
+
+  const stats = new Map<string, { goals: number; assists: number; against: number; plusMinus: number }>();
+  for (const p of attending) {
+    stats.set(p.id, { goals: 0, assists: 0, against: 0, plusMinus: 0 });
+  }
+
+  for (const ev of game.events) {
+    if (ev.type !== 'goal') continue;
+    const shift = game.shifts.find(s =>
+      (s.status === 'completed' || s.status === 'active') &&
+      ev.minute >= s.startMinute &&
+      (s.status === 'active' || ev.minute < s.endMinute)
+    );
+    const onField = new Set(shift?.players.map(sp => sp.playerId) ?? []);
+
+    if (ev.isOpponentGoal) {
+      for (const pid of onField) {
+        const s = stats.get(pid);
+        if (s) { s.against++; s.plusMinus--; }
+      }
+    } else {
+      const scorer = stats.get(ev.playerId);
+      if (scorer) scorer.goals++;
+      for (const aId of ev.assistPlayerIds ?? []) {
+        const a = stats.get(aId);
+        if (a) a.assists++;
+      }
+      for (const pid of onField) {
+        const s = stats.get(pid);
+        if (s) s.plusMinus++;
+      }
+    }
+  }
+
+  const dateStr = (() => {
+    try { return format(parseISO(game.date + 'T12:00:00'), 'EEE MMM d, yyyy'); }
+    catch { return game.date; }
+  })();
+  const haStr = game.homeAway === 'home' ? 'Home' : 'Away';
+  const scoreStr = `${game.score.home}-${game.score.away}`;
+  const finalLine = game.status === 'completed'
+    ? `Final: ${scoreStr}`
+    : game.status === 'scheduled'
+      ? 'Not played yet'
+      : `${scoreStr} (in progress)`;
+
+  const teamGoals = game.events.filter(e => e.type === 'goal' && !e.isOpponentGoal).length;
+  const oppGoals = game.events.filter(e => e.type === 'goal' && e.isOpponentGoal).length;
+
+  const lines: string[] = [];
+  lines.push(`vs ${game.opponent} (${haStr})`);
+  lines.push(`${dateStr} · ${finalLine}`);
+  lines.push(`Formation: ${game.formation}`);
+  lines.push('');
+  lines.push(`PLAYERS (${attending.length})`);
+  lines.push('');
+
+  for (const p of attending) {
+    const mins = totalMinutes.get(p.id) ?? 0;
+    const positions = Array.from(positionsPlayed.get(p.id) ?? []).join(', ') || '—';
+    const s = stats.get(p.id) ?? { goals: 0, assists: 0, against: 0, plusMinus: 0 };
+    const pm = s.plusMinus >= 0 ? `+${s.plusMinus}` : `${s.plusMinus}`;
+    lines.push(`#${p.number} ${p.name}`);
+    lines.push(`  ${mins} min · ${positions}`);
+    lines.push(`  G:${s.goals} · A:${s.assists} · GA:${s.against} · +/-:${pm}`);
+    lines.push('');
+  }
+
+  lines.push(`Team: ${teamGoals}G scored · ${oppGoals}G allowed`);
+  return lines.join('\n').trimEnd();
+};
+
 export const POSITION_LABELS: Partial<Record<string, string>> = {
   GK: 'GK', CB: 'CB', LCB: 'LCB', RCB: 'RCB',
   LB: 'LB', RB: 'RB', LWB: 'LWB', RWB: 'RWB',

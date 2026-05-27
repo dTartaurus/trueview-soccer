@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, Calendar, ChevronRight, X, Check, Trash2 } from 'lucide-react';
+import { Plus, Calendar, ChevronRight, X, Check, Trash2, Share2 } from 'lucide-react';
 import { useStore } from '@/store/useStore';
-import { generateId, formatDate } from '@/lib/utils';
+import { generateId, buildGameSheet } from '@/lib/utils';
 import type { Game, GameShift } from '@/types';
 import { format } from 'date-fns';
 
@@ -35,7 +35,23 @@ const statusBadge = (status: Game['status']) => {
 
 export const Games = () => {
   const navigate = useNavigate();
-  const { games, isCoach, saveGame, deleteGame } = useStore();
+  const { games, players, isCoach, saveGame, deleteGame } = useStore();
+
+  const handleShare = async (game: Game) => {
+    const text = buildGameSheet(game, players);
+    const title = `Game vs ${game.opponent}`;
+    if (navigator.share) {
+      try { await navigator.share({ title, text }); }
+      catch { /* user cancelled */ }
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      alert('Game sheet copied to clipboard');
+    } catch {
+      alert('Could not copy game sheet');
+    }
+  };
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({
     date: format(new Date(), 'yyyy-MM-dd'),
@@ -193,6 +209,15 @@ export const Games = () => {
               </div>
               <ChevronRight className="text-gray-400 shrink-0" size={18} />
             </button>
+            {game.status !== 'scheduled' && (
+              <button
+                onClick={e => { e.stopPropagation(); handleShare(game); }}
+                className="p-4 text-gray-300 active:text-blue-500 shrink-0"
+                aria-label="Share game sheet"
+              >
+                <Share2 size={17} />
+              </button>
+            )}
             {isCoach && (
               <button
                 onClick={e => {
