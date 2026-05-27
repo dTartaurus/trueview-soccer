@@ -224,13 +224,24 @@ export const GameActive = () => {
   };
 
   // ── Goal ─────────────────────────────────────────────────────────────────────
+  const resetGoalForm = () => setGoalForm({ scorerId: '', assistIds: [], isOpponent: false, opponentNumber: '' });
+  const openGoalModal = () => { resetGoalForm(); setShowGoalModal(true); };
+  const closeGoalModal = () => { setShowGoalModal(false); resetGoalForm(); };
+
   const logGoal = async () => {
     if (!goalForm.scorerId && !goalForm.isOpponent) return;
+    const onFieldIdSet = new Set((activeShift?.players ?? []).map(sp => sp.playerId));
+    const validScorerId = goalForm.isOpponent
+      ? ''
+      : (onFieldIdSet.has(goalForm.scorerId) ? goalForm.scorerId : '');
+    if (!goalForm.isOpponent && !validScorerId) return;
+
+    const validAssistIds = goalForm.assistIds.filter(id => onFieldIdSet.has(id) && id !== validScorerId);
     const oppNumParsed = parseInt(goalForm.opponentNumber, 10);
     const event: GameEvent = {
       id: generateId(), type: 'goal', minute: timer.gameMinute,
-      playerId: goalForm.scorerId,
-      assistPlayerIds: goalForm.assistIds.length > 0 ? goalForm.assistIds : undefined,
+      playerId: validScorerId,
+      assistPlayerIds: validAssistIds.length > 0 ? validAssistIds : undefined,
       isOpponentGoal: goalForm.isOpponent,
       opponentScorerNumber: goalForm.isOpponent && Number.isFinite(oppNumParsed) && oppNumParsed > 0
         ? oppNumParsed
@@ -240,7 +251,7 @@ export const GameActive = () => {
       ? { ...game.score, away: game.score.away + 1 }
       : { ...game.score, home: game.score.home + 1 };
     await updateGame(game.id, { events: [...game.events, event], score });
-    setGoalForm({ scorerId: '', assistIds: [], isOpponent: false, opponentNumber: '' });
+    resetGoalForm();
     setShowGoalModal(false);
   };
 
@@ -745,7 +756,7 @@ export const GameActive = () => {
       {isCoach && (
         <div className="bg-gray-900 border-t border-gray-700 px-3 py-3 pb-8 shrink-0">
           <div className="flex gap-2">
-            <button onClick={() => setShowGoalModal(true)}
+            <button onClick={openGoalModal}
               className="flex-1 bg-amber-600 rounded-xl py-3 flex flex-col items-center gap-0.5 active:scale-95">
               <Trophy size={18} />
               <span className="text-xs font-medium">Goal</span>
@@ -780,7 +791,7 @@ export const GameActive = () => {
 
       {/* ── Goal Modal ── */}
       {showGoalModal && (
-        <div className="fixed inset-0 bg-black/70 flex items-end z-50" onClick={() => setShowGoalModal(false)}>
+        <div className="fixed inset-0 bg-black/70 flex items-end z-50" onClick={closeGoalModal}>
           <div className="w-full bg-gray-800 rounded-t-2xl p-5 max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             <h3 className="text-lg font-bold mb-4">Log Goal</h3>
             <div className="space-y-3">
@@ -810,8 +821,13 @@ export const GameActive = () => {
                   .map(sp => players.find(p => p.id === sp.playerId))
                   .filter((p): p is NonNullable<typeof p> => !!p)
                   .sort((a, b) => a.number - b.number);
-                const assistCandidates = onFieldPlayers.filter(p => p.id !== goalForm.scorerId);
-                const atAssistLimit = goalForm.assistIds.length >= MAX_ASSISTS;
+                const onFieldIdSet = new Set(onFieldPlayers.map(p => p.id));
+                // Drop any stale IDs (player came off the field after they were picked)
+                const validAssistIds = goalForm.assistIds.filter(id => onFieldIdSet.has(id) && id !== goalForm.scorerId);
+                const scorerStillOnField = !goalForm.scorerId || onFieldIdSet.has(goalForm.scorerId);
+                const effectiveScorerId = scorerStillOnField ? goalForm.scorerId : '';
+                const assistCandidates = onFieldPlayers.filter(p => p.id !== effectiveScorerId);
+                const atAssistLimit = validAssistIds.length >= MAX_ASSISTS;
                 return (
                   <>
                     {onFieldPlayers.length === 0 ? (
@@ -828,7 +844,7 @@ export const GameActive = () => {
                                   scorerId: p.id,
                                   assistIds: f.assistIds.filter(id => id !== p.id),
                                 }))}
-                                className={`text-sm py-1.5 px-2 rounded-lg ${goalForm.scorerId === p.id ? 'bg-amber-600' : 'bg-gray-700'}`}>
+                                className={`text-sm py-1.5 px-2 rounded-lg ${effectiveScorerId === p.id ? 'bg-amber-600' : 'bg-gray-700'}`}>
                                 #{p.number} {p.name.split(' ')[0]}
                               </button>
                             ))}
@@ -836,15 +852,15 @@ export const GameActive = () => {
                         </div>
                         <div>
                           <label className="text-xs text-gray-400 mb-1 flex items-center justify-between">
-                            <span>Assists (optional · {goalForm.assistIds.length}/{MAX_ASSISTS})</span>
-                            {goalForm.assistIds.length > 0 && (
+                            <span>Assists (optional · {validAssistIds.length}/{MAX_ASSISTS})</span>
+                            {validAssistIds.length > 0 && (
                               <button onClick={() => setGoalForm(f => ({ ...f, assistIds: [] }))}
                                 className="text-[10px] text-gray-500 underline">clear</button>
                             )}
                           </label>
                           <div className="grid grid-cols-2 gap-1.5 max-h-32 overflow-y-auto">
                             {assistCandidates.map(p => {
-                              const idx = goalForm.assistIds.indexOf(p.id);
+                              const idx = validAssistIds.indexOf(p.id);
                               const selected = idx !== -1;
                               const disabled = !selected && atAssistLimit;
                               return (
