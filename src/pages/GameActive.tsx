@@ -30,7 +30,10 @@ export const GameActive = () => {
     assistIds: string[];
     isOpponent: boolean;
     opponentNumber: string;
-  }>({ scorerId: '', assistIds: [], isOpponent: false, opponentNumber: '' });
+    minute: number;
+  }>({ scorerId: '', assistIds: [], isOpponent: false, opponentNumber: '', minute: 0 });
+  const [editingEventId, setEditingEventId] = useState<string | null>(null);
+  const [showEditGameModal, setShowEditGameModal] = useState(false);
   const MAX_ASSISTS = 5;
 
   // Swap map: benchPlayerId → onFieldPlayerId they replace (empty string = no change)
@@ -224,35 +227,89 @@ export const GameActive = () => {
   };
 
   // ── Goal ─────────────────────────────────────────────────────────────────────
-  const resetGoalForm = () => setGoalForm({ scorerId: '', assistIds: [], isOpponent: false, opponentNumber: '' });
-  const openGoalModal = () => { resetGoalForm(); setShowGoalModal(true); };
-  const closeGoalModal = () => { setShowGoalModal(false); resetGoalForm(); };
+  const resetGoalForm = () => setGoalForm({
+    scorerId: '', assistIds: [], isOpponent: false, opponentNumber: '', minute: timer.gameMinute,
+  });
+  const openGoalModal = () => { setEditingEventId(null); resetGoalForm(); setShowGoalModal(true); };
+  const closeGoalModal = () => { setShowGoalModal(false); setEditingEventId(null); resetGoalForm(); };
+
+  const openGoalModalForEvent = (ev: GameEvent) => {
+    setEditingEventId(ev.id);
+    setGoalForm({
+      scorerId: ev.playerId,
+      assistIds: ev.assistPlayerIds ?? [],
+      isOpponent: ev.isOpponentGoal,
+      opponentNumber: ev.opponentScorerNumber ? String(ev.opponentScorerNumber) : '',
+      minute: ev.minute,
+    });
+    setShowGoalModal(true);
+  };
+
+  // Eligible scorers/assists. While the game is live and we're adding a NEW
+  // goal, restrict to the active shift. When editing, or when the game is
+  // completed (so there's no active shift to restrict to), allow any
+  // attending player.
+  const goalEligibilityMode: 'on-field' | 'all-attending' =
+    editingEventId || game.status === 'completed' ? 'all-attending' : 'on-field';
 
   const logGoal = async () => {
     if (!goalForm.scorerId && !goalForm.isOpponent) return;
-    const onFieldIdSet = new Set((activeShift?.players ?? []).map(sp => sp.playerId));
+    const eligibleIds = new Set(
+      goalEligibilityMode === 'all-attending'
+        ? attendingPlayers.map(p => p.id)
+        : (activeShift?.players ?? []).map(sp => sp.playerId)
+    );
     const validScorerId = goalForm.isOpponent
       ? ''
-      : (onFieldIdSet.has(goalForm.scorerId) ? goalForm.scorerId : '');
+      : (eligibleIds.has(goalForm.scorerId) ? goalForm.scorerId : '');
     if (!goalForm.isOpponent && !validScorerId) return;
 
-    const validAssistIds = goalForm.assistIds.filter(id => onFieldIdSet.has(id) && id !== validScorerId);
+    const validAssistIds = goalForm.assistIds.filter(id => eligibleIds.has(id) && id !== validScorerId);
     const oppNumParsed = parseInt(goalForm.opponentNumber, 10);
-    const event: GameEvent = {
-      id: generateId(), type: 'goal', minute: timer.gameMinute,
+    const minute = Math.max(0, Math.min(120, Math.floor(goalForm.minute || 0)));
+    const buildEvent = (id: string): GameEvent => ({
+      id, type: 'goal', minute,
       playerId: validScorerId,
       assistPlayerIds: validAssistIds.length > 0 ? validAssistIds : undefined,
       isOpponentGoal: goalForm.isOpponent,
       opponentScorerNumber: goalForm.isOpponent && Number.isFinite(oppNumParsed) && oppNumParsed > 0
         ? oppNumParsed
         : undefined,
-    };
-    const score = goalForm.isOpponent
-      ? { ...game.score, away: game.score.away + 1 }
-      : { ...game.score, home: game.score.home + 1 };
-    await updateGame(game.id, { events: [...game.events, event], score });
+    });
+
+    let nextEvents: GameEvent[];
+    let nextScore = { ...game.score };
+    if (editingEventId) {
+      const prev = game.events.find(e => e.id === editingEventId);
+      nextEvents = game.events.map(e => e.id === editingEventId ? buildEvent(editingEventId) : e);
+      // Re-balance score if the goal switched sides between Us / Them.
+      if (prev && prev.isOpponentGoal !== goalForm.isOpponent) {
+        if (prev.isOpponentGoal) {
+          nextScore = { home: nextScore.home + 1, away: Math.max(0, nextScore.away - 1) };
+        } else {
+          nextScore = { home: Math.max(0, nextScore.home - 1), away: nextScore.away + 1 };
+        }
+      }
+    } else {
+      nextEvents = [...game.events, buildEvent(generateId())];
+      nextScore = goalForm.isOpponent
+        ? { ...nextScore, away: nextScore.away + 1 }
+        : { ...nextScore, home: nextScore.home + 1 };
+    }
+    await updateGame(game.id, { events: nextEvents, score: nextScore });
+    setEditingEventId(null);
     resetGoalForm();
     setShowGoalModal(false);
+  };
+
+  const deleteGoalEvent = async (eventId: string) => {
+    const ev = game.events.find(e => e.id === eventId);
+    if (!ev) return;
+    const nextEvents = game.events.filter(e => e.id !== eventId);
+    const nextScore = ev.isOpponentGoal
+      ? { ...game.score, away: Math.max(0, game.score.away - 1) }
+      : { ...game.score, home: Math.max(0, game.score.home - 1) };
+    await updateGame(game.id, { events: nextEvents, score: nextScore });
   };
 
   // ── AI Shift Recommendation ───────────────────────────────────────────────────
@@ -780,26 +837,49 @@ export const GameActive = () => {
                 <span className="text-xs font-medium">Half</span>
               </button>
             )}
-            <button onClick={endGame}
-              className="flex-1 bg-red-800 rounded-xl py-3 flex flex-col items-center gap-0.5 active:scale-95">
-              <Flag size={18} />
-              <span className="text-xs font-medium">End</span>
-            </button>
+            {game.status === 'completed' ? (
+              <button onClick={() => setShowEditGameModal(true)}
+                className="flex-1 bg-gray-600 rounded-xl py-3 flex flex-col items-center gap-0.5 active:scale-95">
+                <Flag size={18} />
+                <span className="text-xs font-medium">Edit</span>
+              </button>
+            ) : (
+              <button onClick={endGame}
+                className="flex-1 bg-red-800 rounded-xl py-3 flex flex-col items-center gap-0.5 active:scale-95">
+                <Flag size={18} />
+                <span className="text-xs font-medium">End</span>
+              </button>
+            )}
           </div>
         </div>
       )}
 
       {/* ── Goal Modal ── */}
       {showGoalModal && (
-        <div className="fixed inset-0 bg-black/70 flex items-end z-50" onClick={closeGoalModal}>
+        <div className="fixed inset-0 bg-black/70 flex items-end z-[60]" onClick={closeGoalModal}>
           <div className="w-full bg-gray-800 rounded-t-2xl p-5 max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-            <h3 className="text-lg font-bold mb-4">Log Goal</h3>
+            <h3 className="text-lg font-bold mb-4">{editingEventId ? 'Edit Goal' : 'Log Goal'}</h3>
             <div className="space-y-3">
               <div className="flex gap-2">
                 <button onClick={() => setGoalForm(f => ({ ...f, isOpponent: false, opponentNumber: '' }))}
                   className={`flex-1 py-2 rounded-lg font-medium text-sm ${!goalForm.isOpponent ? 'bg-pitch-700' : 'bg-gray-700'}`}>Our Goal</button>
                 <button onClick={() => setGoalForm(f => ({ ...f, isOpponent: true, scorerId: '', assistIds: [] }))}
                   className={`flex-1 py-2 rounded-lg font-medium text-sm ${goalForm.isOpponent ? 'bg-red-700' : 'bg-gray-700'}`}>Their Goal</button>
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 mb-1 block">Minute</label>
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  min={0}
+                  max={120}
+                  value={goalForm.minute}
+                  onChange={e => {
+                    const v = parseInt(e.target.value, 10);
+                    setGoalForm(f => ({ ...f, minute: Number.isFinite(v) ? v : 0 }));
+                  }}
+                  className="w-24 bg-gray-700 text-white text-center text-base rounded-lg px-3 py-2 border border-gray-600"
+                />
               </div>
               {goalForm.isOpponent && (
                 <div>
@@ -817,27 +897,33 @@ export const GameActive = () => {
                 </div>
               )}
               {!goalForm.isOpponent && (() => {
-                const onFieldPlayers = (activeShift?.players ?? [])
-                  .map(sp => players.find(p => p.id === sp.playerId))
-                  .filter((p): p is NonNullable<typeof p> => !!p)
-                  .sort((a, b) => a.number - b.number);
-                const onFieldIdSet = new Set(onFieldPlayers.map(p => p.id));
-                // Drop any stale IDs (player came off the field after they were picked)
-                const validAssistIds = goalForm.assistIds.filter(id => onFieldIdSet.has(id) && id !== goalForm.scorerId);
-                const scorerStillOnField = !goalForm.scorerId || onFieldIdSet.has(goalForm.scorerId);
-                const effectiveScorerId = scorerStillOnField ? goalForm.scorerId : '';
-                const assistCandidates = onFieldPlayers.filter(p => p.id !== effectiveScorerId);
+                const allowAnyAttending = goalEligibilityMode === 'all-attending';
+                const eligiblePlayers = allowAnyAttending
+                  ? attendingPlayers
+                  : (activeShift?.players ?? [])
+                      .map(sp => players.find(p => p.id === sp.playerId))
+                      .filter((p): p is NonNullable<typeof p> => !!p)
+                      .sort((a, b) => a.number - b.number);
+                const eligibleIdSet = new Set(eligiblePlayers.map(p => p.id));
+                const validAssistIds = goalForm.assistIds.filter(id => eligibleIdSet.has(id) && id !== goalForm.scorerId);
+                const scorerEligible = !goalForm.scorerId || eligibleIdSet.has(goalForm.scorerId);
+                const effectiveScorerId = scorerEligible ? goalForm.scorerId : '';
+                const assistCandidates = eligiblePlayers.filter(p => p.id !== effectiveScorerId);
                 const atAssistLimit = validAssistIds.length >= MAX_ASSISTS;
+                const scorerLabel = allowAnyAttending ? 'Scorer' : 'Scorer (on-field only)';
+                const emptyMessage = allowAnyAttending
+                  ? 'No attending players to pick from.'
+                  : 'No active shift — start one first.';
                 return (
                   <>
-                    {onFieldPlayers.length === 0 ? (
-                      <p className="text-xs text-gray-400 italic">No active shift — start one first.</p>
+                    {eligiblePlayers.length === 0 ? (
+                      <p className="text-xs text-gray-400 italic">{emptyMessage}</p>
                     ) : (
                       <>
                         <div>
-                          <label className="text-xs text-gray-400 mb-1 block">Scorer (on-field only)</label>
+                          <label className="text-xs text-gray-400 mb-1 block">{scorerLabel}</label>
                           <div className="grid grid-cols-2 gap-1.5 max-h-40 overflow-y-auto">
-                            {onFieldPlayers.map(p => (
+                            {eligiblePlayers.map(p => (
                               <button key={p.id}
                                 onClick={() => setGoalForm(f => ({
                                   ...f,
@@ -884,10 +970,122 @@ export const GameActive = () => {
                   </>
                 );
               })()}
-              <button onClick={logGoal} disabled={!goalForm.isOpponent && !goalForm.scorerId}
-                className="w-full bg-amber-600 py-3 rounded-xl font-bold disabled:opacity-50">
-                {goalForm.isOpponent ? 'Log Opponent Goal' : 'Log Goal'}
-              </button>
+              <div className="flex gap-2">
+                {editingEventId && (
+                  <button
+                    onClick={async () => {
+                      if (!confirm('Delete this goal?')) return;
+                      await deleteGoalEvent(editingEventId);
+                      closeGoalModal();
+                    }}
+                    className="bg-red-800 px-4 py-3 rounded-xl font-bold">
+                    Delete
+                  </button>
+                )}
+                <button onClick={logGoal} disabled={!goalForm.isOpponent && !goalForm.scorerId}
+                  className="flex-1 bg-amber-600 py-3 rounded-xl font-bold disabled:opacity-50">
+                  {editingEventId
+                    ? 'Save Goal'
+                    : goalForm.isOpponent ? 'Log Opponent Goal' : 'Log Goal'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Edit Events Modal (completed games) ── */}
+      {showEditGameModal && (
+        <div className="fixed inset-0 bg-black/70 flex items-end z-50" onClick={() => setShowEditGameModal(false)}>
+          <div className="w-full bg-gray-800 rounded-t-2xl max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="sticky top-0 bg-gray-800 px-5 pt-5 pb-3 border-b border-gray-700 flex items-center justify-between">
+              <h3 className="text-lg font-bold">Edit Game</h3>
+              <button onClick={() => setShowEditGameModal(false)} className="text-gray-400 text-xl">✕</button>
+            </div>
+            <div className="px-4 py-3 space-y-4">
+
+              {/* Score controls */}
+              <div className="bg-gray-700/40 rounded-xl p-3">
+                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Final Score</p>
+                <p className="text-[11px] text-gray-500 mb-2">Add/Delete a goal below to keep score in sync, or bump directly here.</p>
+                <div className="flex items-center justify-around">
+                  <div className="text-center">
+                    <p className="text-xs text-gray-400 mb-1">Us</p>
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => adjustScore('home', -1)} className="w-7 h-7 bg-gray-700 rounded-full flex items-center justify-center"><Minus size={12} /></button>
+                      <span className="text-2xl font-bold tabular-nums w-8 text-center">{game.score.home}</span>
+                      <button onClick={() => adjustScore('home', 1)} className="w-7 h-7 bg-pitch-700 rounded-full flex items-center justify-center"><Plus size={12} /></button>
+                    </div>
+                  </div>
+                  <div className="text-center">
+                    <p className="text-xs text-gray-400 mb-1">Them</p>
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => adjustScore('away', -1)} className="w-7 h-7 bg-gray-700 rounded-full flex items-center justify-center"><Minus size={12} /></button>
+                      <span className="text-2xl font-bold tabular-nums w-8 text-center">{game.score.away}</span>
+                      <button onClick={() => adjustScore('away', 1)} className="w-7 h-7 bg-red-700 rounded-full flex items-center justify-center"><Plus size={12} /></button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Goal events list */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">
+                    Goal Events ({game.events.filter(e => e.type === 'goal').length})
+                  </p>
+                  <button
+                    onClick={() => openGoalModal()}
+                    className="flex items-center gap-1 text-xs bg-amber-600 px-3 py-1.5 rounded-lg font-medium">
+                    <Plus size={12} /> Add Goal
+                  </button>
+                </div>
+                <div className="space-y-2">
+                  {game.events
+                    .filter(e => e.type === 'goal')
+                    .sort((a, b) => a.minute - b.minute)
+                    .map(ev => {
+                      const scorer = players.find(p => p.id === ev.playerId);
+                      const assistNames = (ev.assistPlayerIds ?? [])
+                        .map(id => players.find(p => p.id === id))
+                        .filter(Boolean)
+                        .map(p => `#${p!.number} ${p!.name.split(' ')[0]}`)
+                        .join(', ');
+                      return (
+                        <div key={ev.id}
+                          className={`rounded-xl p-3 ${ev.isOpponentGoal ? 'bg-red-900/20 border border-red-800/30' : 'bg-gray-700/40'}`}>
+                          <div className="flex items-center gap-3">
+                            <span className="text-sm font-mono text-gray-300 w-10 shrink-0">{ev.minute}'</span>
+                            <div className="flex-1 min-w-0">
+                              {ev.isOpponentGoal ? (
+                                <p className="text-sm text-red-200">
+                                  ⚽ {game.opponent} {ev.opponentScorerNumber ? `#${ev.opponentScorerNumber}` : '(no number)'}
+                                </p>
+                              ) : (
+                                <>
+                                  <p className="text-sm">
+                                    ⚽ {scorer ? `#${scorer.number} ${scorer.name.split(' ')[0]}` : '(unknown scorer)'}
+                                  </p>
+                                  {assistNames && (
+                                    <p className="text-xs text-blue-300 mt-0.5">Assists: {assistNames}</p>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                            <button
+                              onClick={() => openGoalModalForEvent(ev)}
+                              className="text-xs bg-gray-600 px-3 py-1.5 rounded-lg font-medium">
+                              Edit
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  {game.events.filter(e => e.type === 'goal').length === 0 && (
+                    <p className="text-xs text-gray-500 italic text-center py-3">No goal events recorded.</p>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
         </div>
