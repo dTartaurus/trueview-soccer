@@ -23,7 +23,7 @@ export interface ShiftPlayer {
 
 export interface GameShift {
   id: string;
-  shiftNumber: 1 | 2 | 3 | 4 | 5 | 6;
+  shiftNumber: number;
   half: 1 | 2;
   startMinute: number;
   endMinute: number;

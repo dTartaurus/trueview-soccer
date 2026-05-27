@@ -156,6 +156,28 @@ export const computePlayerMinutes = (game: Game, currentGameMinute: number): Map
   return minutes;
 };
 
+// Time spent at the GK position. Mirrors computePlayerMinutes but only counts
+// shift entries where position === 'GK'. Used for the per-player "Time in
+// Goal" stat shown in the game sheet, in-game stats, and player profiles.
+export const computePlayerGoalieMinutes = (game: Game, currentGameMinute: number): Map<string, number> => {
+  const minutes = new Map<string, number>();
+  for (const shift of game.shifts) {
+    if (shift.status === 'completed') {
+      for (const sp of shift.players) {
+        if (sp.position !== 'GK') continue;
+        minutes.set(sp.playerId, (minutes.get(sp.playerId) ?? 0) + (shift.endMinute - shift.startMinute));
+      }
+    } else if (shift.status === 'active') {
+      const partial = Math.max(0, currentGameMinute - shift.startMinute);
+      for (const sp of shift.players) {
+        if (sp.position !== 'GK') continue;
+        minutes.set(sp.playerId, (minutes.get(sp.playerId) ?? 0) + partial);
+      }
+    }
+  }
+  return minutes;
+};
+
 // Outfield minutes split by half. Used for the rule that the off-half GK must
 // play ≥30 outfield minutes in the half they are NOT in goal.
 export const computeOutfieldMinutesByHalf = (
@@ -217,7 +239,7 @@ export const suggestNextShift = (
   const selected = sorted.slice(0, 10);
 
   const formationOutfieldPos = getFormationPositions(game.formation).filter(p => p !== 'GK');
-  const prevShiftNum = (nextShiftNum - 1) as 1 | 2 | 3 | 4 | 5 | 6;
+  const prevShiftNum = nextShiftNum - 1;
   const prevPlayers = game.shifts.find(s => s.shiftNumber === prevShiftNum)?.players ?? [];
 
   const result: ShiftPlayer[] = [{ playerId: activeGkId, position: 'GK' as Position }];
@@ -302,7 +324,8 @@ export const buildGameSheet = (game: Game, players: Player[]): string => {
     .filter(p => game.attendance.includes(p.id))
     .sort((a, b) => a.number - b.number);
 
-  const totalMinutes = new Map<string, number>();
+  const outfieldMinutes = new Map<string, number>();
+  const goalieMinutes = new Map<string, number>();
   const positionsPlayed = new Map<string, Set<string>>();
   const liveMinute = Math.floor(game.timerElapsed / 60);
 
@@ -312,7 +335,11 @@ export const buildGameSheet = (game: Game, players: Player[]): string => {
       ? shift.endMinute - shift.startMinute
       : Math.max(0, liveMinute - shift.startMinute);
     for (const sp of shift.players) {
-      totalMinutes.set(sp.playerId, (totalMinutes.get(sp.playerId) ?? 0) + duration);
+      if (sp.position === 'GK') {
+        goalieMinutes.set(sp.playerId, (goalieMinutes.get(sp.playerId) ?? 0) + duration);
+      } else {
+        outfieldMinutes.set(sp.playerId, (outfieldMinutes.get(sp.playerId) ?? 0) + duration);
+      }
       if (!positionsPlayed.has(sp.playerId)) positionsPlayed.set(sp.playerId, new Set());
       positionsPlayed.get(sp.playerId)!.add(sp.position);
     }
@@ -375,12 +402,16 @@ export const buildGameSheet = (game: Game, players: Player[]): string => {
   lines.push('');
 
   for (const p of attending) {
-    const mins = totalMinutes.get(p.id) ?? 0;
+    const ofMins = outfieldMinutes.get(p.id) ?? 0;
+    const gkMins = goalieMinutes.get(p.id) ?? 0;
     const positions = Array.from(positionsPlayed.get(p.id) ?? []).join(', ') || '—';
     const s = stats.get(p.id) ?? { goals: 0, assists: 0, against: 0, plusMinus: 0 };
     const pm = s.plusMinus >= 0 ? `+${s.plusMinus}` : `${s.plusMinus}`;
+    const minutesLine = gkMins > 0
+      ? `  ${ofMins} min on field · ${gkMins} min in goal · ${positions}`
+      : `  ${ofMins} min · ${positions}`;
     lines.push(`#${p.number} ${p.name}`);
-    lines.push(`  ${mins} min · ${positions}`);
+    lines.push(minutesLine);
     lines.push(`  G:${s.goals} · A:${s.assists} · GA:${s.against} · +/-:${pm}`);
     lines.push('');
   }

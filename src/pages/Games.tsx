@@ -9,7 +9,7 @@ import { format } from 'date-fns';
 const buildEmptyShifts = (): GameShift[] =>
   [1, 2, 3, 4, 5, 6].map(n => ({
     id: generateId(),
-    shiftNumber: n as 1 | 2 | 3 | 4 | 5 | 6,
+    shiftNumber: n,
     half: n <= 3 ? 1 : 2,
     startMinute: (n - 1) * 15,
     endMinute: n * 15,

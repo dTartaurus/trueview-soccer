@@ -3,8 +3,8 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { Play, Pause, Plus, Minus, Flag, Trophy, Check, BarChart2, UserPlus, Zap, ChevronDown, ChevronUp } from 'lucide-react';
 import { useStore } from '@/store/useStore';
 import { useGameTimer } from '@/hooks/useGameTimer';
-import { generateId, computePlayerMinutes, computePlayerPositionStats, computeOutfieldMinutesByHalf } from '@/lib/utils';
-import type { GameEvent, ShiftPlayer, Position } from '@/types';
+import { generateId, computePlayerMinutes, computePlayerPositionStats, computeOutfieldMinutesByHalf, computePlayerGoalieMinutes } from '@/lib/utils';
+import type { GameEvent, GameShift, ShiftPlayer, Position } from '@/types';
 
 const POSITION_COLORS: Record<string, string> = {
   GK: 'bg-yellow-600', LB: 'bg-blue-700', RB: 'bg-blue-700',
@@ -47,6 +47,9 @@ export const GameActive = () => {
   // Coach-set time of next expected substitution. null = auto-default (gameMinute + 15)
   const [nextSubMinuteOverride, setNextSubMinuteOverride] = useState<number | null>(null);
 
+  // GK change UI
+  const [showGkSwapModal, setShowGkSwapModal] = useState(false);
+
   // Sub execute modal
   const [showSubModal, setShowSubModal] = useState(false);
 
@@ -78,12 +81,18 @@ export const GameActive = () => {
   }, [activeShift?.id, attendingPlayers.length]);
 
   const nextShiftNum = activeShift
-    ? Math.min(activeShift.shiftNumber + 1, 6) as 1 | 2 | 3 | 4 | 5 | 6
-    : 2 as 2;
-  const hasNextShift = !!activeShift && activeShift.shiftNumber < 6 && game.status !== 'completed';
+    ? activeShift.shiftNumber + 1
+    : 2;
+  const hasNextShift = !!activeShift && game.status !== 'completed';
 
   const minutesMap = useMemo(
     () => computePlayerMinutes(game, timer.gameMinute),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [game.shifts, timer.gameMinute]
+  );
+
+  const goalieMinutesMap = useMemo(
+    () => computePlayerGoalieMinutes(game, timer.gameMinute),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [game.shifts, timer.gameMinute]
   );
@@ -245,12 +254,12 @@ export const GameActive = () => {
     setShowGoalModal(true);
   };
 
-  // Eligible scorers/assists. While the game is live and we're adding a NEW
-  // goal, restrict to the active shift. When editing, or when the game is
-  // completed (so there's no active shift to restrict to), allow any
-  // attending player.
+  // Eligible scorers/assists. While the game is live AND a shift is active,
+  // restrict to the active shift. When editing, game is completed, or no shift
+  // is active (e.g. half-time), fall back to all attending players so the
+  // coach can always log a goal.
   const goalEligibilityMode: 'on-field' | 'all-attending' =
-    editingEventId || game.status === 'completed' ? 'all-attending' : 'on-field';
+    editingEventId || game.status === 'completed' || !activeShift ? 'all-attending' : 'on-field';
 
   const logGoal = async () => {
     if (!goalForm.scorerId && !goalForm.isOpponent) return;
@@ -437,20 +446,91 @@ export const GameActive = () => {
   // ── Execute Shift ─────────────────────────────────────────────────────────────
   const executeShift = async () => {
     if (!nextShiftLineup || !activeShift) return;
-    const nextShift = game.shifts.find(s => s.shiftNumber === nextShiftNum);
-    if (!nextShift) return;
     const subMin = timer.gameMinute;
-    const shifts = game.shifts.map(s => {
-      if (s.id === activeShift.id) return { ...s, status: 'completed' as const, endMinute: subMin };
-      if (s.id === nextShift.id) return { ...s, status: 'active' as const, players: nextShiftLineup, startMinute: subMin };
-      return s;
-    });
+    let nextShift = game.shifts.find(s => s.shiftNumber === nextShiftNum);
+    const baseShifts = game.shifts.map(s =>
+      s.id === activeShift.id ? { ...s, status: 'completed' as const, endMinute: subMin } : s
+    );
+    let shifts: GameShift[];
+    if (nextShift) {
+      shifts = baseShifts.map(s =>
+        s.id === nextShift!.id
+          ? { ...s, status: 'active' as const, players: nextShiftLineup, startMinute: subMin }
+          : s
+      );
+    } else {
+      // Dynamically create the next shift slot (allows unlimited mid-game subs).
+      const half: 1 | 2 = game.currentHalf === 2 ? 2 : 1;
+      nextShift = {
+        id: generateId(), shiftNumber: nextShiftNum, half,
+        startMinute: subMin, endMinute: subMin + 15,
+        status: 'active', players: nextShiftLineup,
+      };
+      shifts = [...baseShifts, nextShift];
+    }
     await updateGame(game.id, { shifts });
     setShowSubModal(false);
     setSwapMap({});
     setAiSwapMap({});
     setSwapsConfirmed(false);
     setAiShiftReasoning('');
+    setNextSubMinuteOverride(null);
+  };
+
+  // ── Change Goalie (mid-game GK swap) ──────────────────────────────────────────
+  const changeGoalie = async (newGkId: string) => {
+    if (!activeShift) return;
+    const currentGk = activeShift.players.find(p => p.position === 'GK');
+    if (!currentGk || currentGk.playerId === newGkId) {
+      setShowGkSwapModal(false);
+      return;
+    }
+    const subMin = timer.gameMinute;
+    const newGkOnField = activeShift.players.find(p => p.playerId === newGkId);
+
+    // Start with everyone except the two players involved, then re-add them
+    // with their new positions.
+    const carried = activeShift.players.filter(
+      p => p.playerId !== currentGk.playerId && p.playerId !== newGkId
+    );
+    const newPlayers: ShiftPlayer[] = [
+      ...carried,
+      { playerId: newGkId, position: 'GK' as Position },
+    ];
+    if (newGkOnField) {
+      // GK swap with an on-field player: old GK takes the new GK's old slot.
+      newPlayers.push({ playerId: currentGk.playerId, position: newGkOnField.position });
+    }
+    // else: new GK is from the bench → old GK goes off, no replacement slot.
+
+    const nextNum = activeShift.shiftNumber + 1;
+    const baseShifts = game.shifts.map(s =>
+      s.id === activeShift.id ? { ...s, status: 'completed' as const, endMinute: subMin } : s
+    );
+    const existing = game.shifts.find(s => s.shiftNumber === nextNum);
+    let shifts: GameShift[];
+    if (existing) {
+      shifts = baseShifts.map(s =>
+        s.id === existing.id
+          ? { ...s, status: 'active' as const, players: newPlayers, startMinute: subMin }
+          : s
+      );
+    } else {
+      const half: 1 | 2 = game.currentHalf === 2 ? 2 : 1;
+      shifts = [
+        ...baseShifts,
+        {
+          id: generateId(), shiftNumber: nextNum, half,
+          startMinute: subMin, endMinute: subMin + 15,
+          status: 'active', players: newPlayers,
+        },
+      ];
+    }
+    await updateGame(game.id, { shifts });
+    setShowGkSwapModal(false);
+    setSwapMap({});
+    setAiSwapMap({});
+    setSwapsConfirmed(false);
     setNextSubMinuteOverride(null);
   };
 
@@ -545,14 +625,25 @@ export const GameActive = () => {
             <div className="px-3 py-2 space-y-1.5">
               {activeShift.players.map(sp => {
                 const p = players.find(pl => pl.id === sp.playerId);
-                const mins = minutesMap.get(sp.playerId) ?? 0;
+                const isGk = sp.position === 'GK';
+                const mins = isGk
+                  ? (goalieMinutesMap.get(sp.playerId) ?? 0)
+                  : (minutesMap.get(sp.playerId) ?? 0);
+                const minsLabel = isGk ? `${mins}m GK` : `${mins}m`;
                 const color = POSITION_COLORS[sp.position] ?? 'bg-gray-600';
                 return (
                   <div key={sp.playerId} className="flex items-center gap-2">
                     <span className={`${color} text-white text-xs font-bold px-1.5 py-0.5 rounded w-10 text-center shrink-0`}>{sp.position}</span>
                     <span className="text-xs text-gray-400 w-5 shrink-0">#{p?.number}</span>
                     <span className="text-sm text-white flex-1">{p?.name?.split(' ')[0]}</span>
-                    <span className="text-xs text-gray-400">{mins}m</span>
+                    <span className="text-xs text-gray-400">{minsLabel}</span>
+                    {isGk && isCoach && isLiveGame && (
+                      <button
+                        onClick={() => setShowGkSwapModal(true)}
+                        className="text-[10px] bg-yellow-700 hover:bg-yellow-600 active:bg-yellow-800 text-white px-2 py-0.5 rounded">
+                        Change
+                      </button>
+                    )}
                   </div>
                 );
               })}
@@ -1091,6 +1182,44 @@ export const GameActive = () => {
         </div>
       )}
 
+      {/* ── Change Goalie Modal ── */}
+      {showGkSwapModal && activeShift && (() => {
+        const currentGk = activeShift.players.find(p => p.position === 'GK');
+        const currentGkPlayer = currentGk ? players.find(p => p.id === currentGk.playerId) : null;
+        const candidates = attendingPlayers
+          .filter(p => p.id !== currentGk?.playerId)
+          .sort((a, b) => a.number - b.number);
+        return (
+          <div className="fixed inset-0 bg-black/70 flex items-end z-[60]" onClick={() => setShowGkSwapModal(false)}>
+            <div className="w-full bg-gray-800 rounded-t-2xl p-5 max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-lg font-bold">Change Goalie</h3>
+                <button onClick={() => setShowGkSwapModal(false)} className="text-gray-400 text-xl">✕</button>
+              </div>
+              <p className="text-xs text-gray-400 mb-1">
+                Current GK: {currentGkPlayer ? `#${currentGkPlayer.number} ${currentGkPlayer.name}` : '(none)'} · {goalieMinutesMap.get(currentGk?.playerId ?? '') ?? 0}m in goal
+              </p>
+              <p className="text-[11px] text-gray-500 mb-3">
+                Pick the new GK. If they were on the field, the current GK takes their old position. Otherwise the current GK goes to the bench.
+              </p>
+              <div className="grid grid-cols-2 gap-1.5 max-h-[50vh] overflow-y-auto">
+                {candidates.map(p => {
+                  const onField = activeShift.players.some(sp => sp.playerId === p.id);
+                  return (
+                    <button key={p.id}
+                      onClick={() => changeGoalie(p.id)}
+                      className="text-sm py-2 px-2 rounded-lg bg-gray-700 active:bg-gray-600 text-left">
+                      <p className="font-medium">#{p.number} {p.name.split(' ')[0]}</p>
+                      <p className="text-[10px] text-gray-400">{onField ? 'on field' : 'on bench'}</p>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ── Sub Execute Modal ── */}
       {showSubModal && nextShiftLineup && activeShift && (
         <div className="fixed inset-0 bg-black/80 flex items-end z-50" onClick={() => setShowSubModal(false)}>
@@ -1197,6 +1326,7 @@ export const GameActive = () => {
                 .sort((a, b) => (minutesMap.get(b.id) ?? 0) - (minutesMap.get(a.id) ?? 0))
                 .map(p => {
                   const mins = minutesMap.get(p.id) ?? 0;
+                  const gkMins = goalieMinutesMap.get(p.id) ?? 0;
                   const goals = gameGoals.goals.get(p.id) ?? 0;
                   const assists = gameGoals.assists.get(p.id) ?? 0;
                   const positions = positionsPlayedMap.get(p.id);
@@ -1211,15 +1341,21 @@ export const GameActive = () => {
                         <span className={`text-sm font-bold w-8 text-center ${goals > 0 ? 'text-amber-400' : 'text-gray-600'}`}>{goals > 0 ? goals : '—'}</span>
                         <span className={`text-sm font-bold w-8 text-center ${assists > 0 ? 'text-blue-400' : 'text-gray-600'}`}>{assists > 0 ? assists : '—'}</span>
                       </div>
-                      {positions && positions.size > 0 && (
-                        <p className="text-xs text-gray-500 mt-1 ml-5">{Array.from(positions).join(', ')}</p>
-                      )}
+                      <div className="flex items-center gap-3 ml-5 mt-1 text-xs text-gray-500">
+                        {positions && positions.size > 0 && (
+                          <span>{Array.from(positions).join(', ')}</span>
+                        )}
+                        {gkMins > 0 && (
+                          <span className="text-yellow-400 font-medium">{gkMins}m in goal</span>
+                        )}
+                      </div>
                     </div>
                   );
                 })}
-              <div className="flex gap-4 pt-2 text-xs text-gray-500 px-1">
-                <span className="text-amber-400 font-bold">col 5</span><span>= Goals</span>
-                <span className="text-blue-400 font-bold">col 6</span><span>= Assists</span>
+              <div className="flex gap-4 pt-2 text-xs text-gray-500 px-1 flex-wrap">
+                <span><span className="font-mono">Nm</span> = outfield minutes</span>
+                <span><span className="text-amber-400 font-bold">G</span> · <span className="text-blue-400 font-bold">A</span></span>
+                <span><span className="text-yellow-400">GK min</span> = time in goal</span>
               </div>
             </div>
           </div>
