@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { Play, Pause, Plus, Minus, Flag, Trophy, Check, BarChart2, UserPlus, Zap, ChevronDown, ChevronUp } from 'lucide-react';
 import { useStore } from '@/store/useStore';
 import { useGameTimer } from '@/hooks/useGameTimer';
-import { generateId, computePlayerMinutes, computePlayerPositionStats } from '@/lib/utils';
+import { generateId, computePlayerMinutes, computePlayerPositionStats, computeOutfieldMinutesByHalf } from '@/lib/utils';
 import type { GameEvent, ShiftPlayer, Position } from '@/types';
 
 const POSITION_COLORS: Record<string, string> = {
@@ -56,14 +56,17 @@ export const GameActive = () => {
   const benchPlayers = attendingPlayers.filter(p => !onFieldIds.has(p.id));
   const notAttending = players.filter(p => !game.attendance.includes(p.id)).sort((a, b) => a.number - b.number);
 
-  // Players who were benched last shift (must play next)
-  const prevShift = activeShift
-    ? game.shifts.find(s => s.shiftNumber === activeShift.shiftNumber - 1 && s.status === 'completed')
-    : null;
+  // Rule: no player sits out two shifts in a row. Every player on the bench
+  // during the active shift MUST be in the next shift's lineup.
   const prevBenchedIds = useMemo(() => {
-    if (!prevShift) return new Set<string>();
-    return new Set(attendingPlayers.filter(p => !prevShift.players.some(sp => sp.playerId === p.id)).map(p => p.id));
-  }, [prevShift?.id, attendingPlayers.length]);
+    if (!activeShift) return new Set<string>();
+    return new Set(
+      attendingPlayers
+        .filter(p => !activeShift.players.some(sp => sp.playerId === p.id))
+        .map(p => p.id)
+    );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeShift?.id, attendingPlayers.length]);
 
   const nextShiftNum = activeShift
     ? Math.min(activeShift.shiftNumber + 1, 6) as 1 | 2 | 3 | 4 | 5 | 6
@@ -254,16 +257,22 @@ export const GameActive = () => {
         joinedAtMinute: lateArrivalTimes[p.id] ?? 0,
       }));
 
+      const halfMinutesMap = computeOutfieldMinutesByHalf(game, timer.gameMinute);
       const allPlayersData = attendingPlayers.map(p => {
         const isOnField = refOnFieldIds.has(p.id);
         const rawMins = minutesMap.get(p.id) ?? 0;
         const adjustedMins = isOnField ? rawMins + minutesUntilSub : rawMins;
         const posStats = positionStatsMap.get(p.id);
         const currentPosPm = currentGamePosPlusMinus.get(p.id);
+        const halfMins = halfMinutesMap.get(p.id) ?? { h1: 0, h2: 0 };
         return {
           id: p.id, name: p.name, number: p.number,
           preferredPositions: p.positions,
           minutesThisGame: adjustedMins,
+          outfieldMinutesH1: halfMins.h1,
+          outfieldMinutesH2: halfMins.h2,
+          isH1Gk: p.id === game.h1GoalkeeperId,
+          isH2Gk: p.id === game.h2GoalkeeperId,
           joinedAtMinute: lateArrivalTimes[p.id] ?? 0,
           currentGamePositionStats: currentPosPm
             ? Array.from(currentPosPm.entries()).map(([pos, pm]) => ({ position: pos, plusMinus: pm }))
@@ -295,6 +304,8 @@ export const GameActive = () => {
             benchPlayers: benchList,
             allPlayers: allPlayersData,
             activeGkId,
+            h1GkId: game.h1GoalkeeperId,
+            h2GkId: game.h2GoalkeeperId,
             isSecondHalf: game.currentHalf === 2,
           },
         }),

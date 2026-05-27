@@ -135,21 +135,56 @@ export const getFormationPositions = (formation: string): string[] =>
   FORMATIONS[formation] ?? FORMATIONS['4-3-3'];
 
 // Returns minutes played per player based on completed + active shifts
+// On-field (outfield) minutes per player. GK position time is NOT counted here:
+// goalkeeping is tracked separately so half-vs-half outfield balance stays fair.
 export const computePlayerMinutes = (game: Game, currentGameMinute: number): Map<string, number> => {
   const minutes = new Map<string, number>();
   for (const shift of game.shifts) {
     if (shift.status === 'completed') {
       for (const sp of shift.players) {
+        if (sp.position === 'GK') continue;
         minutes.set(sp.playerId, (minutes.get(sp.playerId) ?? 0) + (shift.endMinute - shift.startMinute));
       }
     } else if (shift.status === 'active') {
       const partial = Math.max(0, currentGameMinute - shift.startMinute);
       for (const sp of shift.players) {
+        if (sp.position === 'GK') continue;
         minutes.set(sp.playerId, (minutes.get(sp.playerId) ?? 0) + partial);
       }
     }
   }
   return minutes;
+};
+
+// Outfield minutes split by half. Used for the rule that the off-half GK must
+// play ≥30 outfield minutes in the half they are NOT in goal.
+export const computeOutfieldMinutesByHalf = (
+  game: Game,
+  currentGameMinute: number
+): Map<string, { h1: number; h2: number }> => {
+  const result = new Map<string, { h1: number; h2: number }>();
+  const add = (id: string, half: 1 | 2, mins: number) => {
+    const cur = result.get(id) ?? { h1: 0, h2: 0 };
+    if (half === 1) cur.h1 += mins;
+    else cur.h2 += mins;
+    result.set(id, cur);
+  };
+  for (const shift of game.shifts) {
+    const half = shift.half;
+    if (shift.status === 'completed') {
+      for (const sp of shift.players) {
+        if (sp.position === 'GK') continue;
+        add(sp.playerId, half, shift.endMinute - shift.startMinute);
+      }
+    } else if (shift.status === 'active') {
+      const partial = Math.max(0, currentGameMinute - shift.startMinute);
+      for (const sp of shift.players) {
+        if (sp.position === 'GK') continue;
+        add(sp.playerId, half, partial);
+      }
+    }
+  }
+  return result;
 };
 
 // Suggests the 11 players for the next shift, prioritising least time played.

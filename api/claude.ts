@@ -327,7 +327,7 @@ Use the set_lineup tool to return exactly ${slotsToFill} player-position assignm
 async function handleShiftRecommendation(data: unknown, res: VercelResponse, anthropic: Anthropic) {
   const {
     nextShiftNumber, formation, teamName, opponent, gameMinute, nextSubMinute,
-    currentShiftPlayers, benchPlayers, allPlayers, activeGkId, isSecondHalf,
+    currentShiftPlayers, benchPlayers, allPlayers, activeGkId, h1GkId, h2GkId, isSecondHalf,
   } = data as {
     nextShiftNumber: number;
     formation: string;
@@ -338,11 +338,15 @@ async function handleShiftRecommendation(data: unknown, res: VercelResponse, ant
     currentShiftPlayers: { playerId: string; name: string; number: number; position: string; minutesThisGame: number }[];
     benchPlayers: { playerId: string; name: string; number: number; minutesThisGame: number; mustPlayNext: boolean; joinedAtMinute?: number }[];
     allPlayers: {
-      id: string; name: string; number: number; preferredPositions: string[]; minutesThisGame: number; joinedAtMinute?: number;
+      id: string; name: string; number: number; preferredPositions: string[]; minutesThisGame: number;
+      outfieldMinutesH1: number; outfieldMinutesH2: number; isH1Gk: boolean; isH2Gk: boolean;
+      joinedAtMinute?: number;
       currentGamePositionStats: { position: string; plusMinus: number }[];
       positionStats: { position: string; minutesPlayed: number; plusMinus: number; plusMinusPer90: number; goals: number; assists: number }[];
     }[];
     activeGkId: string;
+    h1GkId: string;
+    h2GkId: string;
     isSecondHalf: boolean;
   };
 
@@ -376,6 +380,7 @@ async function handleShiftRecommendation(data: unknown, res: VercelResponse, ant
     .map(p => {
       const preferred = (p.preferredPositions ?? []).length > 0 ? p.preferredPositions.join(', ') : 'flexible';
       const lateNote = p.joinedAtMinute ? ` | joined min ${p.joinedAtMinute} (max ~${90 - p.joinedAtMinute}min available)` : '';
+      const gkTag = p.isH1Gk && p.isH2Gk ? ' [GK both halves]' : p.isH1Gk ? ' [H1 GK]' : p.isH2Gk ? ' [H2 GK]' : '';
 
       const currentStats = p.currentGamePositionStats ?? [];
       const currentLine = currentStats.length > 0
@@ -389,35 +394,45 @@ async function handleShiftRecommendation(data: unknown, res: VercelResponse, ant
           ).join('\n')
         : '      No prior match history';
 
-      return `  id:${p.id} #${p.number} ${p.name} | ${p.minutesThisGame}min (projected at sub) | preferred: ${preferred}${lateNote}\n${currentLine}\n    HISTORICAL by position:\n${historyLines}`;
+      return `  id:${p.id} #${p.number} ${p.name}${gkTag} | ${p.minutesThisGame}min outfield (projected at sub) | H1 outfield ${p.outfieldMinutesH1}min, H2 outfield ${p.outfieldMinutesH2}min | preferred: ${preferred}${lateNote}\n${currentLine}\n    HISTORICAL by position:\n${historyLines}`;
     })
     .join('\n\n');
 
+  const offHalfGkId = isSecondHalf ? h1GkId : h2GkId;
+  const offHalfGk = allPlayers.find(p => p.id === offHalfGkId && offHalfGkId !== activeGkId);
+  const offHalfGkCurrentMins = offHalfGk
+    ? (isSecondHalf ? offHalfGk.outfieldMinutesH2 : offHalfGk.outfieldMinutesH1)
+    : 0;
+  const halfEndMinute = isSecondHalf ? 90 : 45;
+  const offHalfGkBlock = offHalfGk
+    ? `3. id:${offHalfGk.id} (#${offHalfGk.number} ${offHalfGk.name}) plays GK in the OTHER half. They have ${offHalfGkCurrentMins} outfield minutes this half so far. They MUST reach ≥30 outfield minutes in this half (ends at minute ${halfEndMinute}). If they are still on the bench and this half is running out, they MUST be in your subs.`
+    : '3. No off-half GK constraint applies (same GK both halves, or GK currently on field).';
+
   const mustPlayBlock = mustPlayList.length > 0
-    ? mustPlayList.map((p, i) => `${i + 2}. id:${p.playerId} (#${p.number} ${p.name}) was benched last shift — MUST come on.`).join('\n')
-    : '2. No consecutive-bench violations to resolve.';
+    ? mustPlayList.map((p, i) => `${i + 4}. id:${p.playerId} (#${p.number} ${p.name}) is currently on the bench — MUST be in your subs list (no player may sit two shifts in a row).`).join('\n')
+    : `4. (no other must-play players; the bench is empty or already satisfied)`;
 
   const prompt = `You are coaching "${teamName}" vs ${opponent}. It is minute ${gameMinute} (${isSecondHalf ? '2nd' : '1st'} half), ${formation} formation.
 
 Decide which substitutions to make at minute ${nextSubMinute} (Shift ${nextShiftNumber} starts).
 GK is locked: id:${activeGkId} (${activeGk?.name ?? ''}) — never substitute.
 
-CURRENTLY ON FIELD (position | projected minutes by the time of the sub at minute ${nextSubMinute}):
+ALL "minutes" below refer to OUTFIELD minutes only. Time spent at GK does NOT count toward a player's on-field total — goalkeeping is tracked separately so the off-half GK still needs outfield time in their non-GK half.
+
+CURRENTLY ON FIELD (position | projected OUTFIELD minutes by the time of the sub at minute ${nextSubMinute}):
 ${currentLines}
 
-BENCH (actual minutes played so far — they don't change between now and the sub):
+BENCH (actual outfield minutes played so far — they don't change between now and the sub):
 ${benchLines}
 
-HARD CONSTRAINTS:
+HARD CONSTRAINTS (must all be satisfied — these are non-negotiable):
 1. Never substitute the GK (id:${activeGkId}).
+2. NO TWO SHIFTS IN A ROW: Every player currently on the bench MUST appear in your substitutions list (as the benchPlayerId of some swap). A player cannot sit two consecutive shifts.
+${offHalfGkBlock}
 ${mustPlayBlock}
 
-OPTIMIZATION — apply in this exact order:
-1. EQUALIZE TIME (MOST IMPORTANT): The goal is for every player to finish the game with the same total minutes. At minute ${nextSubMinute}:
-   - The bench players with the FEWEST minutes MUST come on.
-   - The on-field players with the MOST projected minutes (numbers shown next to each ON-FIELD line) MUST come off.
-   - You MUST recommend at least one substitution unless every bench player already has more minutes than every on-field non-GK player.
-   - Sort the bench list ascending by minutes and the on-field list descending by projected minutes, then pair them top-to-top.
+OPTIMIZATION — apply in this exact order (only AFTER all hard constraints are satisfied):
+1. EQUALIZE OUTFIELD TIME (MOST IMPORTANT): At minute ${nextSubMinute}, the on-field players with the MOST projected outfield minutes MUST come off, and the bench players with the FEWEST outfield minutes MUST come on. Sort both lists, pair them top-to-top.
 2. PLUS/MINUS: Among players with similar minutes, prefer the bench player with the better +/- in the target position. Weight THIS GAME +/- most heavily; use HISTORICAL /90 as tiebreaker.
 3. PREFERRED POSITIONS: When multiple on-field players could come off, prefer the swap that puts the bench player into one of their preferred positions.
 
