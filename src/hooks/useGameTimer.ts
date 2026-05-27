@@ -17,7 +17,7 @@ export const useGameTimer = (game: Game | null): TimerState => {
 
   useEffect(() => {
     const isRunning =
-      game?.status === 'first-half' || game?.status === 'second-half';
+      (game?.status === 'first-half' || game?.status === 'second-half') && !!game?.timerStartedAt;
     if (!isRunning) return;
     const id = setInterval(() => setTick(t => t + 1), 1000);
     return () => clearInterval(id);
@@ -36,7 +36,8 @@ export const useGameTimer = (game: Game | null): TimerState => {
     };
   }
 
-  const isRunning = game.status === 'first-half' || game.status === 'second-half';
+  const isRunning =
+    (game.status === 'first-half' || game.status === 'second-half') && !!game.timerStartedAt;
 
   let totalSeconds = game.timerElapsed;
   if (isRunning && game.timerStartedAt) {
