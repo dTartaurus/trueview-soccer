@@ -413,7 +413,11 @@ HARD CONSTRAINTS:
 ${mustPlayBlock}
 
 OPTIMIZATION — apply in this exact order:
-1. EQUALIZE TIME: At the sub (minute ${nextSubMinute}), each on-field player will have the projected minutes shown; each bench player will still have their current minutes. Prioritise bringing on the bench players with the fewest minutes. Each bench player who comes on takes the position of the on-field player who comes off.
+1. EQUALIZE TIME (MOST IMPORTANT): The goal is for every player to finish the game with the same total minutes. At minute ${nextSubMinute}:
+   - The bench players with the FEWEST minutes MUST come on.
+   - The on-field players with the MOST projected minutes (numbers shown next to each ON-FIELD line) MUST come off.
+   - You MUST recommend at least one substitution unless every bench player already has more minutes than every on-field non-GK player.
+   - Sort the bench list ascending by minutes and the on-field list descending by projected minutes, then pair them top-to-top.
 2. PLUS/MINUS: Among players with similar minutes, prefer the bench player with the better +/- in the target position. Weight THIS GAME +/- most heavily; use HISTORICAL /90 as tiebreaker.
 3. PREFERRED POSITIONS: When multiple on-field players could come off, prefer the swap that puts the bench player into one of their preferred positions.
 

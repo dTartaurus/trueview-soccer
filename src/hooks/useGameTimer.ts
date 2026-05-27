@@ -51,8 +51,9 @@ export const useGameTimer = (game: Game | null): TimerState => {
   const halfSecRem = halfSeconds % 60;
   const halfDisplay = `${halfMinutes}:${halfSecRem.toString().padStart(2, '0')}`;
 
-  // Game minute for display (1-90)
-  const gameMinute = Math.floor(totalSeconds / 60) + 1;
+  // Game minute = total elapsed minutes (0-90+). Used for shift bookkeeping,
+  // so it must be true elapsed time, not the "we're in the Nth minute" convention.
+  const gameMinute = Math.floor(totalSeconds / 60);
 
   // Shift: 3 per half, 15 min each
   const shiftInHalf = Math.floor(halfSeconds / (15 * 60)) + 1;

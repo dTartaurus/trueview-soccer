@@ -179,7 +179,9 @@ export const GameActive = () => {
     );
     await updateGame(game.id, { status: 'half-time', timerStartedAt: null, timerElapsed: 45 * 60, shifts });
     setSwapMap({});
+    setAiSwapMap({});
     setSwapsConfirmed(false);
+    setNextSubMinuteOverride(null);
   };
   const startSecondHalf = async () => {
     if (!nextShiftLineup) return;
@@ -189,8 +191,10 @@ export const GameActive = () => {
     );
     await updateGame(game.id, { status: 'second-half', currentHalf: 2, timerStartedAt: Date.now(), timerElapsed: 45 * 60, shifts });
     setSwapMap({});
+    setAiSwapMap({});
     setSwapsConfirmed(false);
     setAiShiftReasoning('');
+    setNextSubMinuteOverride(null);
   };
   const endGame = async () => {
     if (!confirm('End game and mark as completed?')) return;
@@ -352,8 +356,10 @@ export const GameActive = () => {
     await updateGame(game.id, { shifts });
     setShowSubModal(false);
     setSwapMap({});
+    setAiSwapMap({});
     setSwapsConfirmed(false);
     setAiShiftReasoning('');
+    setNextSubMinuteOverride(null);
   };
 
   // ── Late arrival / remove player ─────────────────────────────────────────────
