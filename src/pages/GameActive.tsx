@@ -315,7 +315,13 @@ export const GameActive = () => {
         ? { ...nextScore, away: nextScore.away + 1 }
         : { ...nextScore, home: nextScore.home + 1 };
     }
-    await updateGame(game.id, { events: nextEvents, score: nextScore });
+    try {
+      await updateGame(game.id, { events: nextEvents, score: nextScore });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      alert(`Failed to save goal: ${msg}`);
+      return;
+    }
     setEditingEventId(null);
     resetGoalForm();
     setShowGoalModal(false);

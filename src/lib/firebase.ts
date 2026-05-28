@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 import { initializeApp } from 'firebase/app';
 import {
-  getFirestore,
+  initializeFirestore,
   collection,
   doc,
   getDocs,
@@ -27,7 +27,10 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app);
+// ignoreUndefinedProperties: undefined fields are stripped before write
+// (default Firestore behavior is to throw on undefined, which silently breaks
+// any code path that builds objects with optional fields set to undefined).
+export const db = initializeFirestore(app, { ignoreUndefinedProperties: true });
 
 // Enable offline persistence
 enableIndexedDbPersistence(db).catch(() => {
