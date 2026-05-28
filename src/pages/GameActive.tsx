@@ -262,7 +262,14 @@ export const GameActive = () => {
     editingEventId || game.status === 'completed' || !activeShift ? 'all-attending' : 'on-field';
 
   const logGoal = async () => {
-    if (!goalForm.scorerId && !goalForm.isOpponent) return;
+    // Belt-and-suspenders: on mobile, an open numeric keyboard may swallow the
+    // first tap. Blur whatever currently has focus before we proceed.
+    (document.activeElement as HTMLElement | null)?.blur?.();
+
+    if (!goalForm.scorerId && !goalForm.isOpponent) {
+      alert('Pick a scorer first (or switch to "Their Goal").');
+      return;
+    }
     const eligibleIds = new Set(
       goalEligibilityMode === 'all-attending'
         ? attendingPlayers.map(p => p.id)
@@ -271,7 +278,10 @@ export const GameActive = () => {
     const validScorerId = goalForm.isOpponent
       ? ''
       : (eligibleIds.has(goalForm.scorerId) ? goalForm.scorerId : '');
-    if (!goalForm.isOpponent && !validScorerId) return;
+    if (!goalForm.isOpponent && !validScorerId) {
+      alert('Selected scorer is no longer eligible. Pick a player from the list.');
+      return;
+    }
 
     const validAssistIds = goalForm.assistIds.filter(id => eligibleIds.has(id) && id !== validScorerId);
     const oppNumParsed = parseInt(goalForm.opponentNumber, 10);
@@ -959,18 +969,31 @@ export const GameActive = () => {
               </div>
               <div>
                 <label className="text-xs text-gray-400 mb-1 block">Minute</label>
-                <input
-                  type="number"
-                  inputMode="numeric"
-                  min={0}
-                  max={120}
-                  value={goalForm.minute}
-                  onChange={e => {
-                    const v = parseInt(e.target.value, 10);
-                    setGoalForm(f => ({ ...f, minute: Number.isFinite(v) ? v : 0 }));
-                  }}
-                  className="w-24 bg-gray-700 text-white text-center text-base rounded-lg px-3 py-2 border border-gray-600"
-                />
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setGoalForm(f => ({ ...f, minute: Math.max(0, f.minute - 1) }))}
+                    disabled={goalForm.minute <= 0}
+                    className="w-9 h-9 rounded-lg bg-gray-700 border border-gray-600 text-white flex items-center justify-center disabled:opacity-40"
+                    aria-label="Decrease minute">
+                    <Minus size={14} />
+                  </button>
+                  <span className="w-12 text-center text-base font-bold tabular-nums">{goalForm.minute}'</span>
+                  <button
+                    type="button"
+                    onClick={() => setGoalForm(f => ({ ...f, minute: Math.min(120, f.minute + 1) }))}
+                    disabled={goalForm.minute >= 120}
+                    className="w-9 h-9 rounded-lg bg-gray-700 border border-gray-600 text-white flex items-center justify-center disabled:opacity-40"
+                    aria-label="Increase minute">
+                    <Plus size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setGoalForm(f => ({ ...f, minute: timer.gameMinute }))}
+                    className="text-[11px] text-gray-400 underline ml-1">
+                    now ({timer.gameMinute}')
+                  </button>
+                </div>
               </div>
               {goalForm.isOpponent && (
                 <div>
@@ -1073,7 +1096,11 @@ export const GameActive = () => {
                     Delete
                   </button>
                 )}
-                <button onClick={logGoal} disabled={!goalForm.isOpponent && !goalForm.scorerId}
+                <button
+                  type="button"
+                  onPointerDown={() => (document.activeElement as HTMLElement | null)?.blur?.()}
+                  onClick={logGoal}
+                  disabled={!goalForm.isOpponent && !goalForm.scorerId}
                   className="flex-1 bg-amber-600 py-3 rounded-xl font-bold disabled:opacity-50">
                   {editingEventId
                     ? 'Save Goal'
