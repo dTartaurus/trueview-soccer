@@ -34,6 +34,7 @@ export const GameActive = () => {
   }>({ scorerId: '', assistIds: [], isOpponent: false, opponentNumber: '', minute: 0 });
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
   const [showEditGameModal, setShowEditGameModal] = useState(false);
+  const [showH2GkPicker, setShowH2GkPicker] = useState(false);
   const MAX_ASSISTS = 2;
 
   // Swap map: benchPlayerId → onFieldPlayerId they replace (empty string = no change)
@@ -62,7 +63,12 @@ export const GameActive = () => {
 
   const activeShift = game.shifts.find(s => s.status === 'active') ?? null;
   const onFieldIds = new Set(activeShift?.players.map(p => p.playerId) ?? []);
-  const activeGkId = game.currentHalf === 1 ? game.h1GoalkeeperId : game.h2GoalkeeperId;
+  // During half-time we are planning shift 4, so the H2 GK is the locked
+  // goalie. (currentHalf is still 1 until startSecondHalf flips it to 2.)
+  const activeGkId =
+    game.status === 'half-time'
+      ? game.h2GoalkeeperId
+      : game.currentHalf === 1 ? game.h1GoalkeeperId : game.h2GoalkeeperId;
 
   const attendingPlayers = players.filter(p => game.attendance.includes(p.id)).sort((a, b) => a.number - b.number);
   const inactiveIds = new Set(game.inactivePlayerIds ?? []);
@@ -223,8 +229,31 @@ export const GameActive = () => {
     // for H2 begins at that exact minute. We also record secondHalfStartedAt
     // (in seconds) so the per-half display can reset correctly.
     const resumeMinute = timer.gameMinute;
+
+    // Force the H2 GK into the GK slot. If they're already elsewhere in the
+    // lineup, swap with whoever's at GK; otherwise replace the GK outright.
+    let lineup: ShiftPlayer[] = nextShiftLineup.map(p => ({ ...p }));
+    const h2Gk = game.h2GoalkeeperId;
+    if (h2Gk) {
+      const gkIdx = lineup.findIndex(p => p.position === 'GK');
+      const h2GkIdx = lineup.findIndex(p => p.playerId === h2Gk);
+      if (gkIdx !== -1 && (h2GkIdx === -1 || lineup[h2GkIdx].position !== 'GK')) {
+        if (h2GkIdx !== -1) {
+          // Swap positions — old GK takes H2 GK's outfield slot.
+          const oldGkId = lineup[gkIdx].playerId;
+          const oldOutfieldPos = lineup[h2GkIdx].position;
+          lineup[gkIdx] = { playerId: h2Gk, position: 'GK' as Position };
+          lineup[h2GkIdx] = { playerId: oldGkId, position: oldOutfieldPos };
+        } else {
+          // H2 GK isn't in shift-4 lineup yet — replace the GK with them
+          // (old GK now sits on the bench for shift 4).
+          lineup[gkIdx] = { playerId: h2Gk, position: 'GK' as Position };
+        }
+      }
+    }
+
     const shifts = game.shifts.map(s =>
-      s.shiftNumber === 4 ? { ...s, status: 'active' as const, players: nextShiftLineup, startMinute: resumeMinute, half: 2 as const } : s
+      s.shiftNumber === 4 ? { ...s, status: 'active' as const, players: lineup, startMinute: resumeMinute, half: 2 as const } : s
     );
     await updateGame(game.id, {
       status: 'second-half',
@@ -654,19 +683,37 @@ export const GameActive = () => {
       </div>
 
       {/* ── Half-time banner ── */}
-      {game.status === 'half-time' && (
-        <div className="mx-3 mb-1 bg-blue-700 rounded-xl p-3 flex items-center gap-2 shrink-0">
-          <span className="flex-1 font-bold text-sm">HALF TIME</span>
-          {isCoach && swapsConfirmed && (
-            <button onClick={startSecondHalf} className="bg-white text-blue-700 text-xs font-bold px-3 py-1.5 rounded-lg">
-              Start 2nd Half →
-            </button>
-          )}
-          {isCoach && !swapsConfirmed && (
-            <span className="text-xs text-blue-200">Confirm Shift 4 lineup below first</span>
-          )}
-        </div>
-      )}
+      {game.status === 'half-time' && (() => {
+        const h2Gk = players.find(p => p.id === game.h2GoalkeeperId);
+        return (
+          <div className="mx-3 mb-1 bg-blue-700 rounded-xl p-3 shrink-0 space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="flex-1 font-bold text-sm">HALF TIME</span>
+              {isCoach && swapsConfirmed && (
+                <button onClick={startSecondHalf} className="bg-white text-blue-700 text-xs font-bold px-3 py-1.5 rounded-lg">
+                  Start 2nd Half →
+                </button>
+              )}
+              {isCoach && !swapsConfirmed && (
+                <span className="text-xs text-blue-200">Confirm Shift 4 lineup below first</span>
+              )}
+            </div>
+            {isCoach && (
+              <div className="flex items-center gap-2 border-t border-blue-500/40 pt-2">
+                <span className="text-[11px] uppercase tracking-wide text-blue-200 font-semibold">H2 GK</span>
+                <span className="flex-1 text-sm font-medium">
+                  {h2Gk ? `#${h2Gk.number} ${h2Gk.name}` : 'not set'}
+                </span>
+                <button
+                  onClick={() => setShowH2GkPicker(true)}
+                  className="bg-blue-900/40 text-blue-100 text-xs font-medium px-3 py-1 rounded-lg border border-blue-400/40">
+                  Change
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* ── Scrollable content ── */}
       <div className="flex-1 overflow-y-auto space-y-3 px-3 py-2 pb-4">
@@ -1154,6 +1201,36 @@ export const GameActive = () => {
                     : goalForm.isOpponent ? 'Log Opponent Goal' : 'Log Goal'}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── H2 Goalie Picker (half-time) ── */}
+      {showH2GkPicker && (
+        <div className="fixed inset-0 bg-black/70 flex items-end z-50" onClick={() => setShowH2GkPicker(false)}>
+          <div className="w-full bg-gray-800 rounded-t-2xl p-5 max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <h3 className="text-lg font-bold mb-1">Pick 2nd-Half Goalie</h3>
+            <p className="text-xs text-gray-400 mb-3">Any attending player can take the gloves — on or off the field.</p>
+            <div className="grid grid-cols-2 gap-1.5">
+              {attendingPlayers.map(p => {
+                const selected = game.h2GoalkeeperId === p.id;
+                return (
+                  <button key={p.id}
+                    onClick={async () => {
+                      try {
+                        await updateGame(game.id, { h2GoalkeeperId: p.id });
+                        setShowH2GkPicker(false);
+                      } catch (err) {
+                        alert(`Could not set H2 GK: ${err instanceof Error ? err.message : String(err)}`);
+                      }
+                    }}
+                    className={`text-sm py-2 px-2 rounded-lg text-left ${selected ? 'bg-yellow-600' : 'bg-gray-700 active:bg-gray-600'}`}>
+                    #{p.number} {p.name}
+                    {p.id === game.h1GoalkeeperId && <span className="text-[10px] text-blue-200 block">H1 GK</span>}
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>
