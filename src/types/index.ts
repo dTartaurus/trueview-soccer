@@ -62,6 +62,14 @@ export interface Game {
   presetLineup: ShiftPlayer[];
   h1GoalkeeperId: string;
   h2GoalkeeperId: string;
+  // Players who left mid-game. They stay in attendance so their stats are
+  // preserved, but they are excluded from the active rotation (bench, AI
+  // recommendations, must-play-next, etc).
+  inactivePlayerIds?: string[];
+  // timerElapsed value (in seconds) at the moment second half kicks off. Used
+  // by the timer hook so the "half display" resets when H2 starts even if H1
+  // ran to a non-standard length.
+  secondHalfStartedAt?: number;
 }
 
 export interface Practice {

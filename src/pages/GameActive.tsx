@@ -34,7 +34,7 @@ export const GameActive = () => {
   }>({ scorerId: '', assistIds: [], isOpponent: false, opponentNumber: '', minute: 0 });
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
   const [showEditGameModal, setShowEditGameModal] = useState(false);
-  const MAX_ASSISTS = 5;
+  const MAX_ASSISTS = 2;
 
   // Swap map: benchPlayerId → onFieldPlayerId they replace (empty string = no change)
   const [swapMap, setSwapMap] = useState<Record<string, string>>({});
@@ -65,7 +65,12 @@ export const GameActive = () => {
   const activeGkId = game.currentHalf === 1 ? game.h1GoalkeeperId : game.h2GoalkeeperId;
 
   const attendingPlayers = players.filter(p => game.attendance.includes(p.id)).sort((a, b) => a.number - b.number);
-  const benchPlayers = attendingPlayers.filter(p => !onFieldIds.has(p.id));
+  const inactiveIds = new Set(game.inactivePlayerIds ?? []);
+  // Active attendees = those still in rotation. Used for bench, AI recs,
+  // must-play-next. Inactive (left the game) players keep their stats but are
+  // not eligible for further play.
+  const activeAttendingPlayers = attendingPlayers.filter(p => !inactiveIds.has(p.id));
+  const benchPlayers = activeAttendingPlayers.filter(p => !onFieldIds.has(p.id));
   const notAttending = players.filter(p => !game.attendance.includes(p.id)).sort((a, b) => a.number - b.number);
 
   // Rule: no player sits out two shifts in a row. Every player on the bench
@@ -73,12 +78,12 @@ export const GameActive = () => {
   const prevBenchedIds = useMemo(() => {
     if (!activeShift) return new Set<string>();
     return new Set(
-      attendingPlayers
+      activeAttendingPlayers
         .filter(p => !activeShift.players.some(sp => sp.playerId === p.id))
         .map(p => p.id)
     );
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeShift?.id, attendingPlayers.length]);
+  }, [activeShift?.id, activeAttendingPlayers.length]);
 
   const nextShiftNum = activeShift
     ? activeShift.shiftNumber + 1
@@ -132,8 +137,8 @@ export const GameActive = () => {
       .sort((a, b) => b.shiftNumber - a.shiftNumber)[0] ??
     null;
   const refOnFieldIds = new Set((referenceShift?.players ?? []).map(sp => sp.playerId));
-  const swapOnField = attendingPlayers.filter(p => refOnFieldIds.has(p.id));
-  const swapBench = attendingPlayers.filter(p => !refOnFieldIds.has(p.id));
+  const swapOnField = activeAttendingPlayers.filter(p => refOnFieldIds.has(p.id));
+  const swapBench = activeAttendingPlayers.filter(p => !refOnFieldIds.has(p.id));
 
   // Derive the next shift lineup from swapMap + reference shift
   const nextShiftLineup = useMemo((): ShiftPlayer[] | null => {
@@ -196,11 +201,13 @@ export const GameActive = () => {
   };
   const triggerHalfTime = async () => {
     const endMin = timer.gameMinute;
+    // Pause the timer at whatever minute it is right now — no artificial jump
+    // to 45 minutes. pauseTimer writes the real elapsed value back to the game.
     await pauseTimer();
     const shifts = game.shifts.map(s =>
       s.id === activeShift?.id ? { ...s, status: 'completed' as const, endMinute: endMin } : s
     );
-    await updateGame(game.id, { status: 'half-time', timerStartedAt: null, timerElapsed: 45 * 60, shifts });
+    await updateGame(game.id, { status: 'half-time', shifts });
     setSwapMap({});
     setAiSwapMap({});
     setSwapsConfirmed(false);
@@ -208,11 +215,20 @@ export const GameActive = () => {
   };
   const startSecondHalf = async () => {
     if (!nextShiftLineup) return;
-    const startMin = 45;
+    // Resume the game at the same minute half-time paused on. The active shift
+    // for H2 begins at that exact minute. We also record secondHalfStartedAt
+    // (in seconds) so the per-half display can reset correctly.
+    const resumeMinute = timer.gameMinute;
     const shifts = game.shifts.map(s =>
-      s.shiftNumber === 4 ? { ...s, status: 'active' as const, players: nextShiftLineup, startMinute: startMin } : s
+      s.shiftNumber === 4 ? { ...s, status: 'active' as const, players: nextShiftLineup, startMinute: resumeMinute, half: 2 as const } : s
     );
-    await updateGame(game.id, { status: 'second-half', currentHalf: 2, timerStartedAt: Date.now(), timerElapsed: 45 * 60, shifts });
+    await updateGame(game.id, {
+      status: 'second-half',
+      currentHalf: 2,
+      timerStartedAt: Date.now(),
+      secondHalfStartedAt: game.timerElapsed,
+      shifts,
+    });
     setSwapMap({});
     setAiSwapMap({});
     setSwapsConfirmed(false);
@@ -261,48 +277,59 @@ export const GameActive = () => {
   const goalEligibilityMode: 'on-field' | 'all-attending' =
     editingEventId || game.status === 'completed' || !activeShift ? 'all-attending' : 'on-field';
 
-  const logGoal = async () => {
-    // Belt-and-suspenders: on mobile, an open numeric keyboard may swallow the
-    // first tap. Blur whatever currently has focus before we proceed.
-    (document.activeElement as HTMLElement | null)?.blur?.();
+  const logGoal = () => {
+    console.log('[logGoal] invoked', { goalForm, editingEventId });
+    const isOpponent = goalForm.isOpponent;
+    const scorerId = goalForm.scorerId;
 
-    if (!goalForm.scorerId && !goalForm.isOpponent) {
-      alert('Pick a scorer first (or switch to "Their Goal").');
+    if (!scorerId && !isOpponent) {
+      alert('Please pick a scorer before logging the goal.');
       return;
     }
+
     const eligibleIds = new Set(
       goalEligibilityMode === 'all-attending'
         ? attendingPlayers.map(p => p.id)
         : (activeShift?.players ?? []).map(sp => sp.playerId)
     );
-    const validScorerId = goalForm.isOpponent
-      ? ''
-      : (eligibleIds.has(goalForm.scorerId) ? goalForm.scorerId : '');
-    if (!goalForm.isOpponent && !validScorerId) {
-      alert('Selected scorer is no longer eligible. Pick a player from the list.');
-      return;
+
+    let validScorerId = '';
+    if (!isOpponent) {
+      if (eligibleIds.has(scorerId)) {
+        validScorerId = scorerId;
+      } else {
+        alert('The selected scorer is no longer on the field. Pick someone else.');
+        return;
+      }
     }
 
-    const validAssistIds = goalForm.assistIds.filter(id => eligibleIds.has(id) && id !== validScorerId);
+    const validAssistIds = goalForm.assistIds
+      .filter(id => eligibleIds.has(id) && id !== validScorerId)
+      .slice(0, MAX_ASSISTS);
+
     const oppNumParsed = parseInt(goalForm.opponentNumber, 10);
     const minute = Math.max(0, Math.min(120, Math.floor(goalForm.minute || 0)));
-    const buildEvent = (id: string): GameEvent => ({
-      id, type: 'goal', minute,
-      playerId: validScorerId,
-      assistPlayerIds: validAssistIds.length > 0 ? validAssistIds : undefined,
-      isOpponentGoal: goalForm.isOpponent,
-      opponentScorerNumber: goalForm.isOpponent && Number.isFinite(oppNumParsed) && oppNumParsed > 0
-        ? oppNumParsed
-        : undefined,
-    });
+
+    // Build the event with NO undefined fields — Firestore rejects undefined.
+    const buildEvent = (id: string): GameEvent => {
+      const base: GameEvent = {
+        id, type: 'goal', minute,
+        playerId: validScorerId,
+        isOpponentGoal: isOpponent,
+      };
+      if (validAssistIds.length > 0) base.assistPlayerIds = validAssistIds;
+      if (isOpponent && Number.isFinite(oppNumParsed) && oppNumParsed > 0) {
+        base.opponentScorerNumber = oppNumParsed;
+      }
+      return base;
+    };
 
     let nextEvents: GameEvent[];
     let nextScore = { ...game.score };
     if (editingEventId) {
       const prev = game.events.find(e => e.id === editingEventId);
       nextEvents = game.events.map(e => e.id === editingEventId ? buildEvent(editingEventId) : e);
-      // Re-balance score if the goal switched sides between Us / Them.
-      if (prev && prev.isOpponentGoal !== goalForm.isOpponent) {
+      if (prev && prev.isOpponentGoal !== isOpponent) {
         if (prev.isOpponentGoal) {
           nextScore = { home: nextScore.home + 1, away: Math.max(0, nextScore.away - 1) };
         } else {
@@ -311,20 +338,24 @@ export const GameActive = () => {
       }
     } else {
       nextEvents = [...game.events, buildEvent(generateId())];
-      nextScore = goalForm.isOpponent
+      nextScore = isOpponent
         ? { ...nextScore, away: nextScore.away + 1 }
         : { ...nextScore, home: nextScore.home + 1 };
     }
-    try {
-      await updateGame(game.id, { events: nextEvents, score: nextScore });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      alert(`Failed to save goal: ${msg}`);
-      return;
-    }
+
+    // Close the modal IMMEDIATELY. Firestore writes return from local cache
+    // almost instantly, but if the network is slow they could otherwise stall
+    // the entire UI. We fire-and-forget and surface any write error after.
+    const eventsSnapshot = nextEvents;
+    const scoreSnapshot = nextScore;
     setEditingEventId(null);
     resetGoalForm();
     setShowGoalModal(false);
+    void updateGame(game.id, { events: eventsSnapshot, score: scoreSnapshot }).catch(err => {
+      console.error('[logGoal] write failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      alert(`Goal saved locally but write failed: ${msg}`);
+    });
   };
 
   const deleteGoalEvent = async (eventId: string) => {
@@ -364,7 +395,8 @@ export const GameActive = () => {
       }));
 
       const halfMinutesMap = computeOutfieldMinutesByHalf(game, timer.gameMinute);
-      const allPlayersData = attendingPlayers.map(p => {
+      // Inactive players (who left the game) shouldn't be suggested by the AI.
+      const allPlayersData = activeAttendingPlayers.map(p => {
         const isOnField = refOnFieldIds.has(p.id);
         const rawMins = minutesMap.get(p.id) ?? 0;
         const adjustedMins = isOnField ? rawMins + minutesUntilSub : rawMins;
@@ -556,8 +588,13 @@ export const GameActive = () => {
     await updateGame(game.id, { attendance: [...game.attendance, playerId] });
   };
   const removePlayerFromGame = async (playerId: string) => {
+    // Keep the player in attendance so their accumulated stats (minutes,
+    // goals, assists, +/-) remain in the game sheet and the season totals.
+    // Just add them to inactivePlayerIds so they drop out of the active
+    // rotation (bench list, AI recs, must-play-next).
     setLateArrivalTimes(prev => { const next = { ...prev }; delete next[playerId]; return next; });
-    await updateGame(game.id, { attendance: game.attendance.filter(id => id !== playerId) });
+    const nextInactive = Array.from(new Set([...(game.inactivePlayerIds ?? []), playerId]));
+    await updateGame(game.id, { inactivePlayerIds: nextInactive });
   };
 
   const isLiveGame = ['first-half', 'second-half'].includes(game.status);
@@ -886,7 +923,7 @@ export const GameActive = () => {
         <div className="bg-gray-800 rounded-xl overflow-hidden">
           <div className="flex items-center px-3 py-2.5">
             <p className="flex-1 text-xs font-semibold text-gray-400 uppercase tracking-wide">Playing Time</p>
-            {isCoach && (notAttending.length > 0 || benchPlayers.length > 0) && (
+            {isCoach && (notAttending.length > 0 || benchPlayers.length > 0 || (game.inactivePlayerIds ?? []).length > 0) && (
               <button onClick={() => setShowLateArrivalModal(true)}
                 className="flex items-center gap-1 text-xs text-pitch-400 border border-pitch-700 px-2 py-1 rounded-lg">
                 <UserPlus size={12} /> Adjust
@@ -963,8 +1000,10 @@ export const GameActive = () => {
 
       {/* ── Goal Modal ── */}
       {showGoalModal && (
-        <div className="fixed inset-0 bg-black/70 flex items-end z-[60]" onClick={closeGoalModal}>
-          <div className="w-full bg-gray-800 rounded-t-2xl p-5 max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+        <div
+          className="fixed inset-0 bg-black/70 flex items-end z-[60]"
+          onClick={e => { if (e.target === e.currentTarget) closeGoalModal(); }}>
+          <div className="w-full bg-gray-800 rounded-t-2xl p-5 max-h-[80vh] overflow-y-auto">
             <h3 className="text-lg font-bold mb-4">{editingEventId ? 'Edit Goal' : 'Log Goal'}</h3>
             <div className="space-y-3">
               <div className="flex gap-2">
@@ -1104,10 +1143,8 @@ export const GameActive = () => {
                 )}
                 <button
                   type="button"
-                  onPointerDown={() => (document.activeElement as HTMLElement | null)?.blur?.()}
                   onClick={logGoal}
-                  disabled={!goalForm.isOpponent && !goalForm.scorerId}
-                  className="flex-1 bg-amber-600 py-3 rounded-xl font-bold disabled:opacity-50">
+                  className={`flex-1 bg-amber-600 py-3 rounded-xl font-bold active:bg-amber-700 ${(!goalForm.isOpponent && !goalForm.scorerId) ? 'opacity-60' : ''}`}>
                   {editingEventId
                     ? 'Save Goal'
                     : goalForm.isOpponent ? 'Log Opponent Goal' : 'Log Goal'}
@@ -1219,7 +1256,7 @@ export const GameActive = () => {
       {showGkSwapModal && activeShift && (() => {
         const currentGk = activeShift.players.find(p => p.position === 'GK');
         const currentGkPlayer = currentGk ? players.find(p => p.id === currentGk.playerId) : null;
-        const candidates = attendingPlayers
+        const candidates = activeAttendingPlayers
           .filter(p => p.id !== currentGk?.playerId)
           .sort((a, b) => a.number - b.number);
         return (
@@ -1364,12 +1401,16 @@ export const GameActive = () => {
                   const assists = gameGoals.assists.get(p.id) ?? 0;
                   const positions = positionsPlayedMap.get(p.id);
                   const isOnField = onFieldIds.has(p.id);
+                  const isInactive = inactiveIds.has(p.id);
                   return (
-                    <div key={p.id} className="bg-gray-700/50 rounded-xl p-3">
+                    <div key={p.id} className={`rounded-xl p-3 ${isInactive ? 'bg-gray-700/20 opacity-70' : 'bg-gray-700/50'}`}>
                       <div className="flex items-center gap-3">
-                        <div className={`w-2 h-2 rounded-full shrink-0 ${isOnField ? 'bg-pitch-400' : 'bg-gray-500'}`} />
+                        <div className={`w-2 h-2 rounded-full shrink-0 ${isOnField ? 'bg-pitch-400' : isInactive ? 'bg-gray-600' : 'bg-gray-500'}`} />
                         <span className="text-xs text-gray-400 shrink-0">#{p.number}</span>
-                        <span className="text-sm font-semibold flex-1">{p.name.split(' ')[0]}</span>
+                        <span className="text-sm font-semibold flex-1">
+                          {p.name.split(' ')[0]}
+                          {isInactive && <span className="ml-1.5 text-[10px] text-gray-500 font-normal">(left)</span>}
+                        </span>
                         <span className="text-sm font-mono text-gray-300 w-10 text-right">{mins}m</span>
                         <span className={`text-sm font-bold w-8 text-center ${goals > 0 ? 'text-amber-400' : 'text-gray-600'}`}>{goals > 0 ? goals : '—'}</span>
                         <span className={`text-sm font-bold w-8 text-center ${assists > 0 ? 'text-blue-400' : 'text-gray-600'}`}>{assists > 0 ? assists : '—'}</span>
@@ -1447,7 +1488,36 @@ export const GameActive = () => {
               </div>
             )}
 
-            {notAttending.length === 0 && benchPlayers.length === 0 && (
+            {(game.inactivePlayerIds ?? []).length > 0 && (
+              <div className="mt-5">
+                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Bring Back (left the game)</p>
+                <p className="text-xs text-gray-500 mb-3">Stats are preserved either way. Bringing them back puts them on the bench.</p>
+                <div className="grid grid-cols-2 gap-2">
+                  {(game.inactivePlayerIds ?? [])
+                    .map(id => players.find(p => p.id === id))
+                    .filter((p): p is NonNullable<typeof p> => !!p)
+                    .map(p => {
+                      const mins = minutesMap.get(p.id) ?? 0;
+                      return (
+                        <button key={p.id}
+                          onClick={async () => {
+                            const next = (game.inactivePlayerIds ?? []).filter(id => id !== p.id);
+                            await updateGame(game.id, { inactivePlayerIds: next });
+                          }}
+                          className="flex items-center gap-2 bg-pitch-900/30 border border-pitch-800/40 rounded-xl p-3 text-left active:scale-95">
+                          <div className="w-8 h-8 bg-pitch-700 rounded-full flex items-center justify-center text-sm font-bold shrink-0">{p.number}</div>
+                          <div>
+                            <p className="text-sm font-medium">{p.name.split(' ')[0]}</p>
+                            <p className="text-xs text-gray-400">{mins}m played</p>
+                          </div>
+                        </button>
+                      );
+                    })}
+                </div>
+              </div>
+            )}
+
+            {notAttending.length === 0 && benchPlayers.length === 0 && (game.inactivePlayerIds ?? []).length === 0 && (
               <p className="text-sm text-gray-500 text-center py-4">No adjustments available.</p>
             )}
           </div>

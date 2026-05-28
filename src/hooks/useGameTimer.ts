@@ -45,8 +45,13 @@ export const useGameTimer = (game: Game | null): TimerState => {
   }
   totalSeconds = Math.floor(totalSeconds);
 
-  // Half-relative seconds
-  const halfOffset = game.currentHalf === 2 ? 45 * 60 : 0;
+  // Half-relative seconds. For H2 we offset by the moment H2 actually kicked
+  // off (stored on the game) so the per-half clock resets cleanly even if H1
+  // ended early/late. Falls back to the legacy 45-min mark for games created
+  // before this field existed.
+  const halfOffset = game.currentHalf === 2
+    ? (game.secondHalfStartedAt ?? 45 * 60)
+    : 0;
   const halfSeconds = Math.max(0, totalSeconds - halfOffset);
   const halfMinutes = Math.floor(halfSeconds / 60);
   const halfSecRem = halfSeconds % 60;
