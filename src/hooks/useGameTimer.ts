@@ -50,11 +50,11 @@ export const useGameTimer = (game: Game | null): TimerState => {
   // ended early/late. Falls back to the legacy 45-min mark for games created
   // before this field existed.
   const halfOffset = game.currentHalf === 2
-    ? (game.secondHalfStartedAt ?? 45 * 60)
+    ? Math.floor(game.secondHalfStartedAt ?? 45 * 60)
     : 0;
   const halfSeconds = Math.max(0, totalSeconds - halfOffset);
   const halfMinutes = Math.floor(halfSeconds / 60);
-  const halfSecRem = halfSeconds % 60;
+  const halfSecRem = Math.floor(halfSeconds % 60);
   const halfDisplay = `${halfMinutes}:${halfSecRem.toString().padStart(2, '0')}`;
 
   // Game minute = total elapsed minutes (0-90+). Used for shift bookkeeping,

@@ -192,7 +192,11 @@ export const GameActive = () => {
   // ── Timer ────────────────────────────────────────────────────────────────────
   const pauseTimer = async () => {
     if (!timer.isRunning) return;
-    const elapsed = game.timerElapsed + (game.timerStartedAt ? (Date.now() - game.timerStartedAt) / 1000 : 0);
+    const raw = game.timerElapsed + (game.timerStartedAt ? (Date.now() - game.timerStartedAt) / 1000 : 0);
+    // Floor so timerElapsed is always whole seconds. Otherwise downstream
+    // subtractions (e.g. secondHalfStartedAt) carry fractions into halfSeconds
+    // and the mm:ss display ends up with decimals.
+    const elapsed = Math.floor(raw);
     await updateGame(game.id, { timerElapsed: elapsed, timerStartedAt: null });
   };
   const resumeTimer = async () => {
@@ -226,7 +230,7 @@ export const GameActive = () => {
       status: 'second-half',
       currentHalf: 2,
       timerStartedAt: Date.now(),
-      secondHalfStartedAt: game.timerElapsed,
+      secondHalfStartedAt: Math.floor(game.timerElapsed),
       shifts,
     });
     setSwapMap({});
