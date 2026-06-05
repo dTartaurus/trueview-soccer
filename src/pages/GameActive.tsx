@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { Play, Pause, Plus, Minus, Flag, Trophy, Check, BarChart2, UserPlus, Zap, ChevronDown, ChevronUp } from 'lucide-react';
 import { useStore } from '@/store/useStore';
 import { useGameTimer } from '@/hooks/useGameTimer';
-import { generateId, computePlayerMinutes, computePlayerPositionStats, computeOutfieldMinutesByHalf, computePlayerGoalieMinutes } from '@/lib/utils';
+import { generateId, computePlayerMinutes, computePlayerPositionStats, computeOutfieldMinutesByHalf, computePlayerGoalieMinutes, getFormationPositions } from '@/lib/utils';
 import type { GameEvent, GameShift, ShiftPlayer, Position } from '@/types';
 
 const POSITION_COLORS: Record<string, string> = {
@@ -35,12 +35,16 @@ export const GameActive = () => {
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
   const [showEditGameModal, setShowEditGameModal] = useState(false);
   const [showH2GkPicker, setShowH2GkPicker] = useState(false);
+  const [placingLatePlayerId, setPlacingLatePlayerId] = useState<string | null>(null);
   const MAX_ASSISTS = 2;
 
   // Swap map: benchPlayerId → onFieldPlayerId they replace (empty string = no change)
   const [swapMap, setSwapMap] = useState<Record<string, string>>({});
   // AI recommendations (read-only column, separate from user selections)
   const [aiSwapMap, setAiSwapMap] = useState<Record<string, string>>({});
+  // AI suggestions to place a bench player at an empty formation slot (no
+  // on-field player leaves). Keyed by benchPlayerId, value = position string.
+  const [aiFillMap, setAiFillMap] = useState<Record<string, string>>({});
   const [swapsConfirmed, setSwapsConfirmed] = useState(false);
   const [aiLoadingShift, setAiLoadingShift] = useState(false);
   const [aiShiftReasoning, setAiShiftReasoning] = useState('');
@@ -219,7 +223,7 @@ export const GameActive = () => {
     );
     await updateGame(game.id, { status: 'half-time', shifts });
     setSwapMap({});
-    setAiSwapMap({});
+    setAiSwapMap({}); setAiFillMap({});
     setSwapsConfirmed(false);
     setNextSubMinuteOverride(null);
   };
@@ -263,7 +267,7 @@ export const GameActive = () => {
       shifts,
     });
     setSwapMap({});
-    setAiSwapMap({});
+    setAiSwapMap({}); setAiFillMap({});
     setSwapsConfirmed(false);
     setAiShiftReasoning('');
     setNextSubMinuteOverride(null);
@@ -478,6 +482,7 @@ export const GameActive = () => {
             h1GkId: game.h1GoalkeeperId,
             h2GkId: game.h2GoalkeeperId,
             isSecondHalf: game.currentHalf === 2,
+            unfilledPositions,
           },
         }),
       });
@@ -490,10 +495,12 @@ export const GameActive = () => {
         // API returns direct substitution pairs — no diffing needed
         const validOutIds = new Set(swapOnField.filter(p => p.id !== activeGkId).map(p => p.id));
         const validInIds = new Set(swapBench.map(p => p.id));
-        console.log('[AI shift rec] validInIds:', [...validInIds], 'validOutIds:', [...validOutIds]);
+        const validOpenSlots = new Set(unfilledPositions);
+        console.log('[AI shift rec] validInIds:', [...validInIds], 'validOutIds:', [...validOutIds], 'openSlots:', [...validOpenSlots]);
 
         const newSwapMap: Record<string, string> = {};
-        const rejected: { sub: { benchPlayerId: string; onFieldPlayerId: string }; reason: string }[] = [];
+        const newFillMap: Record<string, string> = {};
+        const rejected: { sub: unknown; reason: string }[] = [];
         for (const sub of json.substitutions as { benchPlayerId: string; onFieldPlayerId: string }[]) {
           const inOk = validInIds.has(sub.benchPlayerId);
           const outOk = validOutIds.has(sub.onFieldPlayerId);
@@ -503,13 +510,27 @@ export const GameActive = () => {
             rejected.push({ sub, reason: !inOk ? 'bench id invalid' : 'on-field id invalid' });
           }
         }
-        if (rejected.length > 0) console.warn('[AI shift rec] rejected subs:', rejected);
-        console.log('[AI shift rec] newSwapMap:', newSwapMap);
+        const fills = Array.isArray(json.openPositionFills)
+          ? (json.openPositionFills as { benchPlayerId: string; position: string }[])
+          : [];
+        for (const fill of fills) {
+          const inOk = validInIds.has(fill.benchPlayerId);
+          const slotOk = validOpenSlots.has(fill.position);
+          if (inOk && slotOk && !newSwapMap[fill.benchPlayerId]) {
+            newFillMap[fill.benchPlayerId] = fill.position;
+          } else {
+            rejected.push({ sub: fill, reason: !inOk ? 'bench id invalid' : !slotOk ? 'position not open' : 'already has swap' });
+          }
+        }
+        if (rejected.length > 0) console.warn('[AI shift rec] rejected suggestions:', rejected);
+        console.log('[AI shift rec] newSwapMap:', newSwapMap, 'newFillMap:', newFillMap);
 
         setAiSwapMap(newSwapMap);
+        setAiFillMap(newFillMap);
         setSwapsConfirmed(false);
+        const totalRecs = Object.keys(newSwapMap).length + Object.keys(newFillMap).length;
         setAiShiftReasoning(
-          Object.keys(newSwapMap).length === 0
+          totalRecs === 0
             ? `${json.reasoning ?? ''}\n\nAI recommends no substitutions this shift — current lineup is already optimally balanced.`
             : (json.reasoning ?? '')
         );
@@ -552,7 +573,7 @@ export const GameActive = () => {
     await updateGame(game.id, { shifts });
     setShowSubModal(false);
     setSwapMap({});
-    setAiSwapMap({});
+    setAiSwapMap({}); setAiFillMap({});
     setSwapsConfirmed(false);
     setAiShiftReasoning('');
     setNextSubMinuteOverride(null);
@@ -610,15 +631,51 @@ export const GameActive = () => {
     await updateGame(game.id, { shifts });
     setShowGkSwapModal(false);
     setSwapMap({});
-    setAiSwapMap({});
+    setAiSwapMap({}); setAiFillMap({});
     setSwapsConfirmed(false);
     setNextSubMinuteOverride(null);
   };
 
   // ── Late arrival / remove player ─────────────────────────────────────────────
+  // Positions for the chosen formation that aren't yet occupied in the active
+  // shift. Used both to offer direct-to-field placement for late arrivals and
+  // to nudge the AI to fill open slots instead of swapping bodies.
+  const unfilledPositions = useMemo<string[]>(() => {
+    if (!activeShift) return [];
+    const formationPositions = getFormationPositions(game.formation);
+    const occupied = new Set<string>(activeShift.players.map(p => p.position));
+    return formationPositions.filter(pos => !occupied.has(pos));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeShift?.id, activeShift?.players.length, game.formation]);
+
   const addLateArrival = async (playerId: string) => {
     setLateArrivalTimes(prev => ({ ...prev, [playerId]: timer.gameMinute }));
     await updateGame(game.id, { attendance: [...game.attendance, playerId] });
+  };
+
+  // Add a late-arriving player directly to a position in the active shift —
+  // used when the team is short-handed and the coach wants the new player on
+  // the field immediately rather than queueing them as a bench sub.
+  const addLateArrivalToField = async (playerId: string, position: string) => {
+    if (!activeShift) {
+      await addLateArrival(playerId);
+      return;
+    }
+    setLateArrivalTimes(prev => ({ ...prev, [playerId]: timer.gameMinute }));
+    const newShiftPlayer: ShiftPlayer = { playerId, position: position as Position };
+    const shifts = game.shifts.map(s =>
+      s.id === activeShift.id
+        ? { ...s, players: [...s.players, newShiftPlayer] }
+        : s
+    );
+    try {
+      await updateGame(game.id, {
+        attendance: [...game.attendance, playerId],
+        shifts,
+      });
+    } catch (err) {
+      alert(`Could not add player to field: ${err instanceof Error ? err.message : String(err)}`);
+    }
   };
   const removePlayerFromGame = async (playerId: string) => {
     // Keep the player in attendance so their accumulated stats (minutes,
@@ -817,6 +874,7 @@ export const GameActive = () => {
                     const aiRecId = aiSwapMap[benchP.id] ?? '';
                     const aiRecPlayer = aiRecId ? swapOnField.find(p => p.id === aiRecId) : null;
                     const aiRecSlot = aiRecId ? referenceShift?.players.find(sp => sp.playerId === aiRecId) : null;
+                    const aiFillPosition = aiFillMap[benchP.id];
 
                     return (
                       <div key={benchP.id}
@@ -836,6 +894,11 @@ export const GameActive = () => {
                             <span className="inline-flex flex-col items-center leading-tight">
                               <span className="text-xs font-medium text-amber-300">{aiRecPlayer.name.split(' ')[0]}</span>
                               <span className="text-[10px] text-amber-500">({aiRecSlot?.position ?? '?'}) {projectedMinutes(aiRecPlayer.id)}m</span>
+                            </span>
+                          ) : aiFillPosition ? (
+                            <span className="inline-flex flex-col items-center leading-tight">
+                              <span className="text-xs font-medium text-pitch-300">→ {aiFillPosition}</span>
+                              <span className="text-[10px] text-pitch-500">open slot</span>
                             </span>
                           ) : (
                             <span className="text-[10px] text-gray-600">—</span>
@@ -940,7 +1003,7 @@ export const GameActive = () => {
               {/* Clear all swaps */}
               {hasAnySwap && (
                 <button
-                  onClick={() => { setSwapMap({}); setAiSwapMap({}); setAiShiftReasoning(''); setSwapsConfirmed(false); }}
+                  onClick={() => { setSwapMap({}); setAiSwapMap({}); setAiFillMap({}); setAiShiftReasoning(''); setSwapsConfirmed(false); }}
                   className="w-full border border-gray-600 rounded-xl py-2 text-xs text-gray-400 active:scale-95 transition-transform"
                 >
                   Clear All Changes
@@ -1529,19 +1592,83 @@ export const GameActive = () => {
             {notAttending.length > 0 && (
               <div className="mb-5">
                 <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Add Player</p>
-                <p className="text-xs text-gray-500 mb-3">Player joins now — their available time starts from minute {timer.gameMinute}.</p>
-                <div className="grid grid-cols-2 gap-2">
-                  {notAttending.map(p => (
-                    <button key={p.id}
-                      onClick={async () => { await addLateArrival(p.id); }}
-                      className="flex items-center gap-2 bg-gray-700 rounded-xl p-3 text-left active:scale-95">
-                      <div className="w-8 h-8 bg-pitch-700 rounded-full flex items-center justify-center text-sm font-bold shrink-0">{p.number}</div>
-                      <div>
-                        <p className="text-sm font-medium">{p.name.split(' ')[0]}</p>
-                        <p className="text-xs text-gray-400">{p.positions[0] ?? 'Any'}</p>
+                <p className="text-xs text-gray-500 mb-3">
+                  Player joins now — their available time starts from minute {timer.gameMinute}.
+                  {activeShift && unfilledPositions.length > 0 && (
+                    <span className="block text-amber-400 mt-1">
+                      ⚠ {unfilledPositions.length} open position{unfilledPositions.length === 1 ? '' : 's'} on the field — tap a player to place them directly.
+                    </span>
+                  )}
+                </p>
+                <div className="space-y-2">
+                  {notAttending.map(p => {
+                    const isPlacing = placingLatePlayerId === p.id;
+                    const canPlaceOnField = !!activeShift && unfilledPositions.length > 0;
+                    const preferredOpen = p.positions.find(pos => unfilledPositions.includes(pos as string));
+                    return (
+                      <div key={p.id} className="bg-gray-700 rounded-xl p-3">
+                        <div className="flex items-center gap-2">
+                          <div className="w-8 h-8 bg-pitch-700 rounded-full flex items-center justify-center text-sm font-bold shrink-0">{p.number}</div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium">{p.name.split(' ')[0]}</p>
+                            <p className="text-xs text-gray-400">
+                              prefers {p.positions.length > 0 ? p.positions.join(', ') : 'any'}
+                            </p>
+                          </div>
+                          {canPlaceOnField ? (
+                            <button
+                              onClick={() => setPlacingLatePlayerId(isPlacing ? null : p.id)}
+                              className="text-xs bg-pitch-700 px-3 py-1.5 rounded-lg font-medium active:bg-pitch-800">
+                              {isPlacing ? 'Cancel' : 'Place'}
+                            </button>
+                          ) : (
+                            <button
+                              onClick={async () => { await addLateArrival(p.id); }}
+                              className="text-xs bg-gray-600 px-3 py-1.5 rounded-lg font-medium active:bg-gray-500">
+                              Add to bench
+                            </button>
+                          )}
+                        </div>
+                        {isPlacing && (
+                          <div className="mt-3 border-t border-gray-600 pt-3 space-y-2">
+                            <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">
+                              Pick an open position
+                            </p>
+                            <div className="flex flex-wrap gap-1.5">
+                              {unfilledPositions.map(pos => {
+                                const isPreferred = (p.positions as string[]).includes(pos);
+                                const isHighlighted = pos === preferredOpen;
+                                return (
+                                  <button key={pos}
+                                    onClick={async () => {
+                                      await addLateArrivalToField(p.id, pos);
+                                      setPlacingLatePlayerId(null);
+                                    }}
+                                    className={`text-xs px-3 py-1.5 rounded-lg font-bold ${
+                                      isHighlighted
+                                        ? 'bg-amber-600 ring-2 ring-amber-300/40'
+                                        : isPreferred
+                                          ? 'bg-amber-700'
+                                          : 'bg-gray-600'
+                                    }`}>
+                                    {pos}{isHighlighted ? ' ★' : ''}
+                                  </button>
+                                );
+                              })}
+                              <button
+                                onClick={async () => {
+                                  await addLateArrival(p.id);
+                                  setPlacingLatePlayerId(null);
+                                }}
+                                className="text-xs px-3 py-1.5 rounded-lg font-bold bg-gray-700 border border-gray-500">
+                                → bench
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </div>
-                    </button>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             )}

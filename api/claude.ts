@@ -328,6 +328,7 @@ async function handleShiftRecommendation(data: unknown, res: VercelResponse, ant
   const {
     nextShiftNumber, formation, teamName, opponent, gameMinute, nextSubMinute,
     currentShiftPlayers, benchPlayers, allPlayers, activeGkId, h1GkId, h2GkId, isSecondHalf,
+    unfilledPositions,
   } = data as {
     nextShiftNumber: number;
     formation: string;
@@ -348,6 +349,7 @@ async function handleShiftRecommendation(data: unknown, res: VercelResponse, ant
     h1GkId: string;
     h2GkId: string;
     isSecondHalf: boolean;
+    unfilledPositions?: string[];
   };
 
   const positionMap: Record<string, string> = {
@@ -412,6 +414,12 @@ async function handleShiftRecommendation(data: unknown, res: VercelResponse, ant
     ? mustPlayList.map((p, i) => `${i + 4}. id:${p.playerId} (#${p.number} ${p.name}) is currently on the bench — MUST be in your subs list (no player may sit two shifts in a row).`).join('\n')
     : `4. (no other must-play players; the bench is empty or already satisfied)`;
 
+  const openSlots = Array.isArray(unfilledPositions) ? unfilledPositions.filter(Boolean) : [];
+  const openSlotsBlock = openSlots.length > 0
+    ? `OPEN POSITIONS — the active shift is short-handed. These formation slots are not currently filled by anyone on the field: ${openSlots.join(', ')}.
+You SHOULD recommend bringing a bench player on at each open slot (use openPositionFills below). Filling an open slot does NOT require taking anyone off the field — pair benchPlayerId with the position only, no onFieldPlayerId needed. Prefer bench players whose preferred positions include the open slot.`
+    : `OPEN POSITIONS: none — every formation slot is filled.`;
+
   const prompt = `You are coaching "${teamName}" vs ${opponent}. It is minute ${gameMinute} (${isSecondHalf ? '2nd' : '1st'} half), ${formation} formation.
 
 Decide which substitutions to make at minute ${nextSubMinute} (Shift ${nextShiftNumber} starts).
@@ -425,13 +433,16 @@ ${currentLines}
 BENCH (actual outfield minutes played so far — they don't change between now and the sub):
 ${benchLines}
 
+${openSlotsBlock}
+
 HARD CONSTRAINTS (must all be satisfied — these are non-negotiable):
 1. Never substitute the GK (id:${activeGkId}).
-2. NO TWO SHIFTS IN A ROW: Every player currently on the bench MUST appear in your substitutions list (as the benchPlayerId of some swap). A player cannot sit two consecutive shifts.
+2. NO TWO SHIFTS IN A ROW: Every player currently on the bench MUST appear in your substitutions list (as the benchPlayerId of some swap) OR in openPositionFills (filling an open slot). A player cannot sit two consecutive shifts.
 ${offHalfGkBlock}
 ${mustPlayBlock}
 
 OPTIMIZATION — apply in this exact order (only AFTER all hard constraints are satisfied):
+0. FILL OPEN POSITIONS FIRST: If OPEN POSITIONS exist, send bench players to those open slots before proposing any swap. A fill keeps everyone on the field; only swap when there are no open slots left.
 1. EQUALIZE OUTFIELD TIME (MOST IMPORTANT): At minute ${nextSubMinute}, the on-field players with the MOST projected outfield minutes MUST come off, and the bench players with the FEWEST outfield minutes MUST come on. Sort both lists, pair them top-to-top.
 2. PLUS/MINUS: Among players with similar minutes, prefer the bench player with the better +/- in the target position. Weight THIS GAME +/- most heavily; use HISTORICAL /90 as tiebreaker.
 3. PREFERRED POSITIONS: When multiple on-field players could come off, prefer the swap that puts the bench player into one of their preferred positions.
@@ -439,13 +450,16 @@ OPTIMIZATION — apply in this exact order (only AFTER all hard constraints are 
 PLAYER DATA (all attendees):
 ${allPlayerLines}
 
-Use set_substitutions to list every swap you recommend.
+Use set_substitutions to list every change. There are two kinds of changes:
+  - SWAP: benchPlayerId comes on, onFieldPlayerId comes off, position is the swapped slot (must be a valid ${formation} slot).
+  - FILL: openPositionFills entry — benchPlayerId comes on at position (one of the OPEN POSITIONS listed above). No on-field player leaves.
+
 CRITICAL: copy the EXACT id strings shown above:
   - benchPlayerId MUST be one of the benchPlayerId values from the BENCH section
-  - onFieldPlayerId MUST be one of the onFieldPlayerId values from the ON-FIELD section (never the GK's id)
+  - onFieldPlayerId (swaps only) MUST be one of the onFieldPlayerId values from the ON-FIELD section (never the GK's id)
   - position MUST be a valid ${formation} formation slot
 
-Empty array is only acceptable if there are zero bench players or every bench player already has more minutes than every on-field non-GK player.`;
+A bench player should appear in EITHER substitutions OR openPositionFills, never both. Empty substitutions + empty openPositionFills is only acceptable if there are zero bench players AND zero open positions.`;
 
   const message = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
@@ -460,7 +474,7 @@ Empty array is only acceptable if there are zero bench players or every bench pl
           properties: {
             substitutions: {
               type: 'array' as const,
-              description: 'List of player swaps. Empty array if no changes recommended.',
+              description: 'Two-way swaps: bench player ON, on-field player OFF. Empty array if no swaps recommended.',
               items: {
                 type: 'object' as const,
                 properties: {
@@ -469,6 +483,18 @@ Empty array is only acceptable if there are zero bench players or every bench pl
                   position: { type: 'string' as const, description: 'position slot being exchanged' },
                 },
                 required: ['benchPlayerId', 'onFieldPlayerId', 'position'],
+              },
+            },
+            openPositionFills: {
+              type: 'array' as const,
+              description: 'Bench players sent into an OPEN POSITION (short-handed team). No on-field player leaves. Empty array if no open positions to fill.',
+              items: {
+                type: 'object' as const,
+                properties: {
+                  benchPlayerId: { type: 'string' as const, description: 'id of bench player coming ON' },
+                  position: { type: 'string' as const, description: 'one of the OPEN POSITIONS listed in the prompt' },
+                },
+                required: ['benchPlayerId', 'position'],
               },
             },
             reasoning: {
@@ -488,7 +514,11 @@ Empty array is only acceptable if there are zero bench players or every bench pl
   if (!toolUse || toolUse.type !== 'tool_use') {
     return res.status(500).json({ error: 'AI did not return substitutions' });
   }
-  const result = toolUse.input as { substitutions: { benchPlayerId: string; onFieldPlayerId: string; position: string }[]; reasoning: string };
+  const result = toolUse.input as {
+    substitutions: { benchPlayerId: string; onFieldPlayerId: string; position: string }[];
+    openPositionFills?: { benchPlayerId: string; position: string }[];
+    reasoning: string;
+  };
   return res.status(200).json(result);
 }
 
