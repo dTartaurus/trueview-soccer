@@ -36,6 +36,7 @@ export const GameActive = () => {
   const [showEditGameModal, setShowEditGameModal] = useState(false);
   const [showH2GkPicker, setShowH2GkPicker] = useState(false);
   const [placingLatePlayerId, setPlacingLatePlayerId] = useState<string | null>(null);
+  const [editingPositionFor, setEditingPositionFor] = useState<string | null>(null);
   const MAX_ASSISTS = 2;
 
   // Swap map: benchPlayerId → onFieldPlayerId they replace (empty string = no change)
@@ -677,6 +678,41 @@ export const GameActive = () => {
       alert(`Could not add player to field: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
+
+  // Change an on-field player's formation slot without subbing them off. If
+  // the target slot is occupied, swap positions with the other player; if it's
+  // open, just move into it. GK slot is off-limits — use the GK swap flow.
+  const changePlayerPosition = async (playerId: string, newPosition: string) => {
+    if (!activeShift) return;
+    if (newPosition === 'GK') {
+      alert('Use the GK Change button to assign a new goalkeeper.');
+      return;
+    }
+    const me = activeShift.players.find(sp => sp.playerId === playerId);
+    if (!me) return;
+    if (me.position === 'GK') {
+      alert('The goalie cannot be moved to an outfield position. Pick a new GK first.');
+      return;
+    }
+    if (me.position === newPosition) return;
+    const occupant = activeShift.players.find(sp => sp.position === newPosition && sp.playerId !== playerId);
+    const myOldPosition = me.position;
+    const updatedPlayers = activeShift.players.map(sp => {
+      if (sp.playerId === playerId) return { ...sp, position: newPosition as Position };
+      if (occupant && sp.playerId === occupant.playerId) return { ...sp, position: myOldPosition };
+      return sp;
+    });
+    const shifts = game.shifts.map(s =>
+      s.id === activeShift.id ? { ...s, players: updatedPlayers } : s
+    );
+    try {
+      await updateGame(game.id, { shifts });
+      setEditingPositionFor(null);
+    } catch (err) {
+      alert(`Could not change position: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
   const removePlayerFromGame = async (playerId: string) => {
     // Keep the player in attendance so their accumulated stats (minutes,
     // goals, assists, +/-) remain in the game sheet and the season totals.
@@ -792,9 +828,19 @@ export const GameActive = () => {
                   : (minutesMap.get(sp.playerId) ?? 0);
                 const minsLabel = isGk ? `${mins}m GK` : `${mins}m`;
                 const color = POSITION_COLORS[sp.position] ?? 'bg-gray-600';
+                const canEditPosition = !isGk && isCoach && isLiveGame;
                 return (
                   <div key={sp.playerId} className="flex items-center gap-2">
-                    <span className={`${color} text-white text-xs font-bold px-1.5 py-0.5 rounded w-10 text-center shrink-0`}>{sp.position}</span>
+                    {canEditPosition ? (
+                      <button
+                        onClick={() => setEditingPositionFor(sp.playerId)}
+                        aria-label={`Change ${p?.name ?? 'player'} position`}
+                        className={`${color} text-white text-xs font-bold px-1.5 py-0.5 rounded w-10 text-center shrink-0 active:opacity-80 ring-1 ring-white/10`}>
+                        {sp.position}
+                      </button>
+                    ) : (
+                      <span className={`${color} text-white text-xs font-bold px-1.5 py-0.5 rounded w-10 text-center shrink-0`}>{sp.position}</span>
+                    )}
                     <span className="text-xs text-gray-400 w-5 shrink-0">#{p?.number}</span>
                     <span className="text-sm text-white flex-1">{p?.name?.split(' ')[0]}</span>
                     <span className="text-xs text-gray-400">{minsLabel}</span>
@@ -1268,6 +1314,61 @@ export const GameActive = () => {
           </div>
         </div>
       )}
+
+      {/* ── Change Position (on-field outfield player) ── */}
+      {editingPositionFor && activeShift && (() => {
+        const me = activeShift.players.find(sp => sp.playerId === editingPositionFor);
+        const meProfile = me ? players.find(pl => pl.id === me.playerId) : null;
+        if (!me) return null;
+        const formationPositions = getFormationPositions(game.formation);
+        const slots = formationPositions.filter(pos => pos !== 'GK');
+        const occupantByPos = new Map<string, ShiftPlayer>();
+        for (const sp of activeShift.players) {
+          if (sp.position !== 'GK') occupantByPos.set(sp.position, sp);
+        }
+        return (
+          <div className="fixed inset-0 bg-black/70 flex items-end z-[60]" onClick={() => setEditingPositionFor(null)}>
+            <div className="w-full bg-gray-800 rounded-t-2xl p-5 max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+              <h3 className="text-lg font-bold mb-1">
+                Move {meProfile ? `#${meProfile.number} ${meProfile.name.split(' ')[0]}` : 'player'}
+              </h3>
+              <p className="text-xs text-gray-400 mb-3">
+                Currently at <span className="font-semibold text-white">{me.position}</span>. Tap a slot — if it's taken, the two will swap.
+              </p>
+              <div className="grid grid-cols-2 gap-1.5">
+                {slots.map(pos => {
+                  const occupant = occupantByPos.get(pos);
+                  const isMe = occupant?.playerId === me.playerId;
+                  const occupantProfile = occupant ? players.find(pl => pl.id === occupant.playerId) : null;
+                  return (
+                    <button key={pos}
+                      onClick={() => changePlayerPosition(me.playerId, pos)}
+                      disabled={isMe}
+                      className={`flex items-center gap-2 text-left rounded-lg px-3 py-2 ${
+                        isMe
+                          ? 'bg-gray-700/40 border border-gray-600/40 opacity-60'
+                          : occupant
+                            ? 'bg-gray-700 active:bg-gray-600 border border-gray-600'
+                            : 'bg-pitch-900/40 border border-pitch-600/40 active:bg-pitch-800/40'
+                      }`}>
+                      <span className={`${POSITION_COLORS[pos] ?? 'bg-gray-600'} text-white text-xs font-bold px-1.5 py-0.5 rounded w-12 text-center shrink-0`}>
+                        {pos}
+                      </span>
+                      <span className="text-xs text-gray-300 flex-1 min-w-0 truncate">
+                        {isMe
+                          ? '(current)'
+                          : occupantProfile
+                            ? `swap with #${occupantProfile.number} ${occupantProfile.name.split(' ')[0]}`
+                            : 'open slot'}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ── H2 Goalie Picker (half-time) ── */}
       {showH2GkPicker && (
