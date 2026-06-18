@@ -65,11 +65,13 @@ export const computeSeasonStats = (
       if (!game.attendance.includes(pid)) continue;
       gamesAttended++;
 
-      // Minutes from shifts
+      // Outfield minutes only — time spent in goal does NOT count toward
+      // the player's on-field total (goalkeeping is tracked separately).
       for (const shift of game.shifts) {
-        if (shift.status === 'completed' && shift.players.some(sp => sp.playerId === pid)) {
-          minutesPlayed += shift.endMinute - shift.startMinute;
-        }
+        if (shift.status !== 'completed') continue;
+        const sp = shift.players.find(p => p.playerId === pid);
+        if (!sp || sp.position === 'GK') continue;
+        minutesPlayed += shift.endMinute - shift.startMinute;
       }
 
       // Events
