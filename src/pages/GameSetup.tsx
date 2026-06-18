@@ -139,14 +139,19 @@ export const GameSetup = () => {
             }))
           : [];
         const totals = seasonStats.find(s => s.playerId === p.id);
+        const gamesAtt = totals?.gamesAttended ?? 0;
+        const mins = totals?.minutesPlayed ?? 0;
         return {
           id: p.id,
           name: p.name,
           number: p.number,
           preferredPositions: p.positions,
           positionStats,
-          totalGamesAttended: totals?.gamesAttended ?? 0,
-          totalMinutesPlayed: totals?.minutesPlayed ?? 0,
+          totalGamesAttended: gamesAtt,
+          totalMinutesPlayed: mins,
+          seasonAvgMinutesPerGame: gamesAtt > 0 ? +((mins / gamesAtt).toFixed(1)) : 0,
+          seasonGoals: totals?.goals ?? 0,
+          seasonPlusMinus: totals?.plusMinus ?? 0,
         };
       });
 

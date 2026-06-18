@@ -225,6 +225,9 @@ async function handleLineupStructured(data: unknown, res: VercelResponse, anthro
       }[];
       totalGamesAttended: number;
       totalMinutesPlayed: number;
+      seasonAvgMinutesPerGame?: number;
+      seasonGoals?: number;
+      seasonPlusMinus?: number;
     }[];
     formation: string;
     teamName: string;
@@ -242,6 +245,13 @@ async function handleLineupStructured(data: unknown, res: VercelResponse, anthro
   const formationPositions = positionMap[formation] ?? positionMap['4-3-3'];
   const slotsToFill = Math.min(attendingCount, 11);
 
+  const seasonAvgs = players
+    .map(p => p.seasonAvgMinutesPerGame ?? 0)
+    .filter(v => v > 0);
+  const teamAvgMin = seasonAvgs.length > 0
+    ? (seasonAvgs.reduce((s, v) => s + v, 0) / seasonAvgs.length).toFixed(1)
+    : 'n/a';
+
   const playerLines = players
     .sort((a, b) => a.number - b.number)
     .map(p => {
@@ -251,9 +261,12 @@ async function handleLineupStructured(data: unknown, res: VercelResponse, anthro
             `      ${s.position}: ${s.minutesPlayed}min | ${s.goals}G | ${s.assists}A | +/-${s.plusMinus} | ${(s.goalsPerMinute * 90).toFixed(2)}G/90 | ${(s.assistsPerMinute * 90).toFixed(2)}A/90`
           ).join('\n')
         : '      No match history yet';
+      const avgMin = p.seasonAvgMinutesPerGame ?? 0;
+      const seasonGoals = p.seasonGoals ?? 0;
+      const seasonPm = p.seasonPlusMinus ?? 0;
       return `  id:${p.id} | #${p.number} ${p.name}
     preferred positions: ${preferred}
-    total games: ${p.totalGamesAttended} | total minutes: ${p.totalMinutesPlayed}
+    season: ${p.totalGamesAttended} games | avg ${avgMin} outfield-min/game | ${seasonGoals}G | +/-${seasonPm}
     performance by position:\n${statsLines}`;
     })
     .join('\n\n');
@@ -263,21 +276,31 @@ async function handleLineupStructured(data: unknown, res: VercelResponse, anthro
 Formation positions available: ${formationPositions}
 Players attending today: ${attendingCount}
 Starting lineup should have: ${slotsToFill} players (fill the ${slotsToFill} most important positions for this formation)
+Team season avg outfield minutes/game: ${teamAvgMin}
+
+REMEMBER: this is only Shift 1 of a 6-shift game. The starting lineup will be rotated each shift by the in-game AI sub-recommendation. Use the starting lineup to set the team up for the FULL match — not to put every star on the field at once.
 
 PLAYER DATA (${players.length} players):
 ${playerLines}
 
-OPTIMIZATION RULES (apply in this order for each position):
-1. PREFERRED POSITION: Strongly prefer players who list this as a preferred position.
-2. POSITION-SPECIFIC PERFORMANCE: Among candidates, rank by their actual stats IN THIS POSITION:
-   - Higher plus/minus in this position = better fit
-   - Higher goals/90 minutes = better for attacking roles (ST, CF, LW, RW, CAM)
-   - Higher assists/90 minutes = better for creative roles (CAM, CM, LW, RW)
-   - Defensive positions (GK, CB, LCB, RCB, LB, RB): prioritise positive plus/minus
-3. If a player has NO history in a position but it's their preferred, they still get priority over someone with bad stats.
-4. Distribute positions logically — don't stack attackers in defensive slots.
+OPTIMIZATION RULES (apply in this order — each rule is balanced against the others, none is absolute on its own):
 
-Use the set_lineup tool to return exactly ${slotsToFill} player-position assignments plus a 2-4 sentence reasoning summary explaining the key decisions.`;
+1. PREFERRED POSITION: Strongly prefer players whose preferred positions include the slot.
+
+2. POSITION-SPECIFIC PERFORMANCE: Among candidates for a position, rank by their stats IN THAT POSITION:
+   - Higher position plus/minus = better fit (they win minutes when on)
+   - Higher goals/90 = better for attacking roles (ST, CF, LW, RW, CAM)
+   - Higher assists/90 = better for creative roles (CAM, CM, LW, RW)
+   - Defensive slots (GK, CB, LCB, RCB, LB, RB): prioritise positive position plus/minus
+   - A player with NO history in their preferred position still beats a player with bad stats elsewhere.
+
+3. SEASON PLAYING-TIME EQUALIZATION: Players whose season avg outfield-minutes/game is BELOW the team average (${teamAvgMin}) should be prioritised for the starting lineup — they need to catch up. A player who has been getting heavy minutes all season can comfortably start on the bench and come on in shifts 2-6.
+
+4. SPREAD STRENGTH ACROSS SHIFTS: Do NOT put every top-performer (highest goals/+ -, highest historical plus/minus) into Shift 1. Bench at least one or two strong players so they can come on for shifts 2-6 and keep the team's level high across the WHOLE 90 minutes. Mix strong + average players in the starting 11; the bench should also contain at least one threat.
+
+5. Don't stack attackers in defensive slots or vice versa.
+
+Use the set_lineup tool to return exactly ${slotsToFill} player-position assignments plus a 2-4 sentence reasoning summary that explicitly references (a) how starting minutes were balanced against season averages and (b) which strong players you intentionally kept on the bench for later shifts.`;
 
   const message = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
@@ -342,6 +365,10 @@ async function handleShiftRecommendation(data: unknown, res: VercelResponse, ant
       id: string; name: string; number: number; preferredPositions: string[]; minutesThisGame: number;
       outfieldMinutesH1: number; outfieldMinutesH2: number; isH1Gk: boolean; isH2Gk: boolean;
       joinedAtMinute?: number;
+      seasonAvgMinutesPerGame?: number;
+      seasonGamesAttended?: number;
+      seasonGoals?: number;
+      seasonPlusMinus?: number;
       currentGamePositionStats: { position: string; plusMinus: number }[];
       positionStats: { position: string; minutesPlayed: number; plusMinus: number; plusMinusPer90: number; goals: number; assists: number }[];
     }[];
@@ -396,9 +423,24 @@ async function handleShiftRecommendation(data: unknown, res: VercelResponse, ant
           ).join('\n')
         : '      No prior match history';
 
-      return `  id:${p.id} #${p.number} ${p.name}${gkTag} | ${p.minutesThisGame}min outfield (projected at sub) | H1 outfield ${p.outfieldMinutesH1}min, H2 outfield ${p.outfieldMinutesH2}min | preferred: ${preferred}${lateNote}\n${currentLine}\n    HISTORICAL by position:\n${historyLines}`;
+      const seasonAvg = p.seasonAvgMinutesPerGame ?? 0;
+      const seasonGames = p.seasonGamesAttended ?? 0;
+      const seasonG = p.seasonGoals ?? 0;
+      const seasonPm = p.seasonPlusMinus ?? 0;
+      const seasonLine = seasonGames > 0
+        ? `    SEASON: ${seasonGames} games, avg ${seasonAvg} outfield-min/game, ${seasonG}G, +/-${seasonPm}`
+        : `    SEASON: no prior games`;
+
+      return `  id:${p.id} #${p.number} ${p.name}${gkTag} | ${p.minutesThisGame}min outfield (projected at sub) | H1 outfield ${p.outfieldMinutesH1}min, H2 outfield ${p.outfieldMinutesH2}min | preferred: ${preferred}${lateNote}\n${seasonLine}\n${currentLine}\n    HISTORICAL by position:\n${historyLines}`;
     })
     .join('\n\n');
+
+  const seasonAvgs = allPlayers
+    .map(p => p.seasonAvgMinutesPerGame ?? 0)
+    .filter(v => v > 0);
+  const teamAvgSeason = seasonAvgs.length > 0
+    ? (seasonAvgs.reduce((s, v) => s + v, 0) / seasonAvgs.length).toFixed(1)
+    : 'n/a';
 
   const offHalfGkId = isSecondHalf ? h1GkId : h2GkId;
   const offHalfGk = allPlayers.find(p => p.id === offHalfGkId && offHalfGkId !== activeGkId);
@@ -443,9 +485,13 @@ ${mustPlayBlock}
 
 OPTIMIZATION — apply in this exact order (only AFTER all hard constraints are satisfied):
 0. FILL OPEN POSITIONS FIRST: If OPEN POSITIONS exist, send bench players to those open slots before proposing any swap. A fill keeps everyone on the field; only swap when there are no open slots left.
-1. EQUALIZE OUTFIELD TIME (MOST IMPORTANT): At minute ${nextSubMinute}, the on-field players with the MOST projected outfield minutes MUST come off, and the bench players with the FEWEST outfield minutes MUST come on. Sort both lists, pair them top-to-top.
-2. PLUS/MINUS: Among players with similar minutes, prefer the bench player with the better +/- in the target position. Weight THIS GAME +/- most heavily; use HISTORICAL /90 as tiebreaker.
-3. PREFERRED POSITIONS: When multiple on-field players could come off, prefer the swap that puts the bench player into one of their preferred positions.
+1. EQUALIZE TIME — IN-GAME AND ACROSS THE SEASON:
+   - PRIMARY: balance projected minutes for THIS game. On-field players with the MOST projected outfield minutes come off; bench players with the FEWEST outfield minutes come on.
+   - SECONDARY (tiebreaker / weighting): also balance season avg outfield-minutes/game (team avg = ${teamAvgSeason}). A bench player whose SEASON avg is below the team average gets a bump up the priority list; a bench player whose season avg is well above the team average can wait another shift if their in-game minutes are similar to peers.
+   - The goal across the 90 minutes is: every player's combined (this game + prior season) minutes converge.
+2. SPREAD STRENGTH ACROSS THE GAME: Do NOT field every strongest player at once. If two or more high-impact players (high season goals or strong position plus/minus) are currently on the field together, prefer a swap that takes ONE of them off so a similar-impact bench player can come on — this keeps the team's level steady through all 6 shifts instead of spiking shift 1-2.
+3. PLUS/MINUS + GOALS (position fit): Among players with similar minutes profiles, prefer the bench player with the better +/- in the target position AND a better goal record in that position when the target is an attacking slot. Weight THIS GAME +/- most heavily; use HISTORICAL /90 as tiebreaker.
+4. PREFERRED POSITIONS: When multiple on-field players could come off, prefer the swap that puts the bench player into one of their preferred positions.
 
 PLAYER DATA (all attendees):
 ${allPlayerLines}

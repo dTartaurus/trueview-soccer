@@ -120,6 +120,51 @@ export const GameActive = () => {
     [completedGames.length]
   );
 
+  // Season totals per player (outfield minutes only — GK shifts are excluded
+  // inside computeSeasonStats). Used to feed the AI an avg-min/game number
+  // so cross-game playing-time fairness drives sub recommendations too.
+  const seasonTotalsMap = useMemo(() => {
+    const map = new Map<string, { gamesAttended: number; minutesPlayed: number; avgMinutes: number; goals: number; plusMinus: number }>();
+    for (const p of players) {
+      let gamesAttended = 0;
+      let minutesPlayed = 0;
+      let goals = 0;
+      let plusMinus = 0;
+      for (const g of completedGames) {
+        if (!g.attendance.includes(p.id)) continue;
+        gamesAttended++;
+        for (const sh of g.shifts) {
+          if (sh.status !== 'completed') continue;
+          const sp = sh.players.find(s => s.playerId === p.id);
+          if (!sp || sp.position === 'GK') continue;
+          minutesPlayed += sh.endMinute - sh.startMinute;
+        }
+        for (const ev of g.events) {
+          if (ev.type !== 'goal') continue;
+          if (ev.isOpponentGoal) {
+            const cover = g.shifts.find(s => s.status === 'completed' && ev.minute >= s.startMinute && ev.minute < s.endMinute && s.players.some(sp => sp.playerId === p.id));
+            if (cover) plusMinus--;
+          } else {
+            if (ev.playerId === p.id) { goals++; plusMinus++; }
+            else {
+              const cover = g.shifts.find(s => s.status === 'completed' && ev.minute >= s.startMinute && ev.minute < s.endMinute && s.players.some(sp => sp.playerId === p.id));
+              if (cover) plusMinus++;
+            }
+          }
+        }
+      }
+      map.set(p.id, {
+        gamesAttended,
+        minutesPlayed,
+        avgMinutes: gamesAttended > 0 ? +((minutesPlayed / gamesAttended).toFixed(1)) : 0,
+        goals,
+        plusMinus,
+      });
+    }
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [completedGames.length, players.length]);
+
   // Plus/minus per player per position in THIS game so far
   const currentGamePosPlusMinus = useMemo(() => {
     const result = new Map<string, Map<string, number>>();
@@ -441,6 +486,7 @@ export const GameActive = () => {
         const posStats = positionStatsMap.get(p.id);
         const currentPosPm = currentGamePosPlusMinus.get(p.id);
         const halfMins = halfMinutesMap.get(p.id) ?? { h1: 0, h2: 0 };
+        const seasonT = seasonTotalsMap.get(p.id);
         return {
           id: p.id, name: p.name, number: p.number,
           preferredPositions: p.positions,
@@ -450,6 +496,10 @@ export const GameActive = () => {
           isH1Gk: p.id === game.h1GoalkeeperId,
           isH2Gk: p.id === game.h2GoalkeeperId,
           joinedAtMinute: lateArrivalTimes[p.id] ?? 0,
+          seasonAvgMinutesPerGame: seasonT?.avgMinutes ?? 0,
+          seasonGamesAttended: seasonT?.gamesAttended ?? 0,
+          seasonGoals: seasonT?.goals ?? 0,
+          seasonPlusMinus: seasonT?.plusMinus ?? 0,
           currentGamePositionStats: currentPosPm
             ? Array.from(currentPosPm.entries()).map(([pos, pm]) => ({ position: pos, plusMinus: pm }))
             : [],
