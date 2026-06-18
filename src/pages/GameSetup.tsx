@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Check, Users, Zap, ArrowRight, ChevronDown, ChevronUp, ArrowLeft } from 'lucide-react';
+import { Check, X, Users, Zap, ArrowRight, ChevronDown, ChevronUp, ArrowLeft } from 'lucide-react';
 import { useStore } from '@/store/useStore';
 import { computeSeasonStats, computePlayerPositionStats, getFormationPositions } from '@/lib/utils';
 import type { ShiftPlayer, Position } from '@/types';
@@ -25,6 +25,10 @@ export const GameSetup = () => {
 
   const [step, setStep] = useState<1 | 2>(1);
   const [attendance, setAttendance] = useState<Set<string>>(new Set(game?.attendance ?? []));
+  const [notAttending, setNotAttending] = useState<Set<string>>(new Set(game?.notAttending ?? []));
+  // Autosave flag — true after the first user-initiated change so we don't
+  // overwrite the saved game with stale defaults on first render.
+  const hasMutatedAttendance = useRef(false);
   const [lineupSlots, setLineupSlots] = useState<LineupSlot[]>([]);
   const [h2Gk, setH2Gk] = useState(game?.h2GoalkeeperId ?? '');
   const [aiLoading, setAiLoading] = useState(false);
@@ -59,13 +63,48 @@ export const GameSetup = () => {
   const h1GkId = lineupSlots.find(s => s.position === 'GK')?.playerId ?? '';
   const benchPlayers = attending.filter(p => !assignedIds.has(p.id));
 
-  const toggleAttendance = (pid: string) => {
-    setAttendance(prev => {
-      const next = new Set(prev);
-      next.has(pid) ? next.delete(pid) : next.add(pid);
-      return next;
-    });
+  // Cycle the player through three states: undecided → attending → not
+  // attending → undecided. The attending and notAttending sets are kept
+  // mutually exclusive.
+  const cycleAttendance = (pid: string) => {
+    hasMutatedAttendance.current = true;
+    if (attendance.has(pid)) {
+      setAttendance(prev => { const n = new Set(prev); n.delete(pid); return n; });
+      setNotAttending(prev => { const n = new Set(prev); n.add(pid); return n; });
+    } else if (notAttending.has(pid)) {
+      setNotAttending(prev => { const n = new Set(prev); n.delete(pid); return n; });
+    } else {
+      setAttendance(prev => { const n = new Set(prev); n.add(pid); return n; });
+    }
   };
+  // Used by All / Clear bulk actions.
+  const setAttendanceBulk = (set: Set<string>, notSet: Set<string>) => {
+    hasMutatedAttendance.current = true;
+    setAttendance(set);
+    setNotAttending(notSet);
+  };
+
+  // Autosave attendance + notAttending after every change so the coach can
+  // leave the setup page and come back without losing their work. The
+  // "Recommend Starting Lineup" button is the canonical commit, but
+  // intermediate state is persisted too.
+  useEffect(() => {
+    if (!hasMutatedAttendance.current || !game) return;
+    const attendingArr = Array.from(attendance);
+    const notArr = Array.from(notAttending);
+    const sameAtt = attendingArr.length === (game.attendance ?? []).length
+      && attendingArr.every(id => game.attendance.includes(id));
+    const sameNot = notArr.length === (game.notAttending ?? []).length
+      && notArr.every(id => (game.notAttending ?? []).includes(id));
+    if (sameAtt && sameNot) return;
+    const handle = setTimeout(() => {
+      updateGame(game.id, { attendance: attendingArr, notAttending: notArr }).catch(err => {
+        console.warn('[GameSetup] autosave failed:', err);
+      });
+    }, 400);
+    return () => clearTimeout(handle);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attendance, notAttending, game?.id]);
 
   const assignPlayer = (slotIdx: number, playerId: string) => {
     setLineupSlots(prev => prev.map((s, i) => i === slotIdx ? { ...s, playerId } : s));
@@ -198,37 +237,57 @@ export const GameSetup = () => {
             <div className="px-4 pt-4 pb-3 flex items-center justify-between border-b border-gray-100">
               <div className="flex items-center gap-2">
                 <Users size={18} className="text-pitch-700" />
-                <h2 className="font-bold text-gray-800">Who's here today?</h2>
+                <h2 className="font-bold text-gray-800">Roster status</h2>
               </div>
-              <div className="flex items-center gap-3">
-                <span className="text-sm font-semibold text-pitch-700">{attendance.size} selected</span>
-                <button onClick={() => setAttendance(new Set(players.map(p => p.id)))}
-                  className="text-xs text-pitch-700 font-medium bg-pitch-50 px-2 py-1 rounded-lg">All</button>
-                <button onClick={() => setAttendance(new Set())}
-                  className="text-xs text-gray-400 font-medium bg-gray-50 px-2 py-1 rounded-lg">Clear</button>
+              <div className="flex items-center gap-2">
+                <button onClick={() => setAttendanceBulk(new Set(players.map(p => p.id)), new Set())}
+                  className="text-xs text-pitch-700 font-medium bg-pitch-50 px-2 py-1 rounded-lg">All ✓</button>
+                <button onClick={() => setAttendanceBulk(new Set(), new Set(players.map(p => p.id)))}
+                  className="text-xs text-red-600 font-medium bg-red-50 px-2 py-1 rounded-lg">All ✗</button>
+                <button onClick={() => setAttendanceBulk(new Set(), new Set())}
+                  className="text-xs text-gray-500 font-medium bg-gray-50 px-2 py-1 rounded-lg">Clear</button>
               </div>
             </div>
+            <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-3 text-xs">
+              <span className="flex items-center gap-1 text-pitch-700"><span className="w-2 h-2 bg-pitch-700 rounded-full" /> {attendance.size} attending</span>
+              <span className="flex items-center gap-1 text-red-600"><span className="w-2 h-2 bg-red-500 rounded-full" /> {notAttending.size} not attending</span>
+              <span className="flex items-center gap-1 text-gray-400 ml-auto">
+                {players.length - attendance.size - notAttending.size} undecided
+              </span>
+            </div>
+            <p className="px-4 pt-2 text-[11px] text-gray-400">
+              Tap a player to cycle: undecided → attending → not attending → undecided. Auto-saved.
+            </p>
             <div className="p-3 grid grid-cols-2 gap-2">
               {sortedAll.map(player => {
-                const present = attendance.has(player.id);
+                const isIn = attendance.has(player.id);
+                const isOut = notAttending.has(player.id);
+                const wrapperCls = isIn
+                  ? 'bg-pitch-50 border-pitch-400 text-pitch-900'
+                  : isOut
+                    ? 'bg-red-50 border-red-300 text-red-900'
+                    : 'bg-gray-50 border-transparent text-gray-500';
+                const badgeCls = isIn
+                  ? 'bg-pitch-700 text-white'
+                  : isOut
+                    ? 'bg-red-500 text-white'
+                    : 'bg-gray-200 text-gray-500';
                 return (
                   <button
                     key={player.id}
-                    onClick={() => toggleAttendance(player.id)}
-                    className={`flex items-center gap-3 p-3 rounded-xl border-2 transition-colors text-left ${
-                      present
-                        ? 'bg-pitch-50 border-pitch-400 text-pitch-900'
-                        : 'bg-gray-50 border-transparent text-gray-500'
-                    }`}
+                    onClick={() => cycleAttendance(player.id)}
+                    className={`flex items-center gap-3 p-3 rounded-xl border-2 transition-colors text-left ${wrapperCls}`}
                   >
-                    <div className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold shrink-0 transition-colors ${
-                      present ? 'bg-pitch-700 text-white' : 'bg-gray-200 text-gray-500'
-                    }`}>
-                      {present ? <Check size={14} /> : player.number}
+                    <div className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold shrink-0 transition-colors ${badgeCls}`}>
+                      {isIn ? <Check size={14} /> : isOut ? <X size={14} /> : player.number}
                     </div>
                     <div className="min-w-0">
                       <p className="font-semibold text-sm truncate">{player.name.split(' ')[0]}</p>
-                      <p className="text-xs text-gray-400">#{player.number}</p>
+                      <p className="text-xs opacity-70">
+                        #{player.number}
+                        {isIn && ' · attending'}
+                        {isOut && ' · not attending'}
+                      </p>
                     </div>
                   </button>
                 );

@@ -70,6 +70,11 @@ export interface Game {
   // by the timer hook so the "half display" resets when H2 starts even if H1
   // ran to a non-standard length.
   secondHalfStartedAt?: number;
+  // Players explicitly marked as not attending during pre-game setup. Players
+  // appearing in NEITHER attendance NOR notAttending are still undecided. The
+  // list is autosaved across visits and consumed when the coach taps
+  // "Recommend Starting Lineup".
+  notAttending?: string[];
 }
 
 export interface Practice {

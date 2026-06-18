@@ -8,7 +8,7 @@ import {
 import { useStore } from '@/store/useStore';
 import { computeSeasonStats } from '@/lib/utils';
 
-type StatKey = 'goals' | 'assists' | 'minutesPlayed' | 'plusMinus' | 'gamesAttended';
+type StatKey = 'goals' | 'assists' | 'avgMinutes' | 'plusMinus' | 'gamesAttended';
 
 export const SeasonStats = () => {
   const { players, games, practices } = useStore();
@@ -19,7 +19,15 @@ export const SeasonStats = () => {
   const practiceCount = (pid: string) =>
     practices.filter(p => p.attendance.includes(pid)).length;
 
-  const stats = computeSeasonStats(players, completedGames, practiceCount);
+  const baseStats = computeSeasonStats(players, completedGames, practiceCount);
+  // Augment with avgMinutes = total outfield minutes / games attended.
+  // Rounded to 1 decimal so the leaderboard shows e.g. 42.5m/g.
+  const stats = baseStats.map(s => ({
+    ...s,
+    avgMinutes: s.gamesAttended > 0
+      ? Math.round((s.minutesPlayed / s.gamesAttended) * 10) / 10
+      : 0,
+  }));
 
   const sorted = [...stats].sort((a, b) => (b[activeTab] as number) - (a[activeTab] as number));
 
@@ -34,7 +42,7 @@ export const SeasonStats = () => {
   const TABS: { key: StatKey; label: string; icon: React.ReactNode; color: string }[] = [
     { key: 'goals', label: 'Goals', icon: <Trophy size={14} />, color: '#d97706' },
     { key: 'assists', label: 'Assists', icon: <Zap size={14} />, color: '#2563eb' },
-    { key: 'minutesPlayed', label: 'Minutes', icon: <Clock size={14} />, color: '#16a34a' },
+    { key: 'avgMinutes', label: 'Avg Min', icon: <Clock size={14} />, color: '#16a34a' },
     { key: 'plusMinus', label: '+/-', icon: <TrendingUp size={14} />, color: '#7c3aed' },
     { key: 'gamesAttended', label: 'Games', icon: <Users size={14} />, color: '#0891b2' }
   ];
@@ -125,7 +133,7 @@ export const SeasonStats = () => {
                     </p>
                     <span className="font-bold text-sm" style={{ color: activeTabConfig.color }}>
                       {activeTab === 'plusMinus' && value > 0 ? '+' : ''}{value}
-                      {activeTab === 'minutesPlayed' ? 'm' : ''}
+                      {activeTab === 'avgMinutes' ? 'm/g' : ''}
                     </span>
                   </div>
                   <div className="h-1.5 bg-gray-100 rounded-full">
